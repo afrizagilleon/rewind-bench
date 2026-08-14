@@ -1,0 +1,45 @@
+{
+  "id": "a5361a2b-e560-4798-937a-18eccddca9a1",
+  "notebook_id": "8aee2070-007a-4a67-984e-3df3e5c641b1",
+  "status": "success",
+  "trigger_source": "manual",
+  "cell_id": null,
+  "parent_run_id": null,
+  "error": null,
+  "started_at": "2026-08-14T23:05:50.617Z",
+  "finished_at": "2026-08-14T23:05:51.767Z",
+  "cell_results": {
+    "fetch-rates": {
+      "ms": 849,
+      "output": {
+        "source": "open.er-api.com",
+        "rate_eur": 0.867144,
+        "rate_idr": 17876.326857,
+        "timestamp": "2026-08-14T23:05:51.524Z"
+      },
+      "source": "const sources = [\n  {\n    name: 'open.er-api.com',\n    url: 'https://open.er-api.com/v6/latest/USD',\n    pick: (d) => d?.rates,\n  },\n];\n\nconst errors = [];\nfor (const s of sources) {\n  try {\n    const res = await fetch(s.url);\n    if (!res.ok) throw new Error(`HTTP ${res.status}`);\n    const data = await res.json();\n    const rates = s.pick(data);\n    if (!rates?.IDR || !rates?.EUR) throw new Error('Rates not found');\n    return { \n      rate_idr: rates.IDR, \n      rate_eur: rates.EUR, \n      source: s.name,\n      timestamp: new Date().toISOString()\n    };\n  } catch (err) {\n    errors.push(`${s.name}: ${err.message}`);\n  }\n}\nthrow new Error(`Fetch failed — ${errors.join(' | ')}`);",
+      "written": [
+        "rate_idr",
+        "rate_eur",
+        "source",
+        "timestamp"
+      ]
+    },
+    "simulate-archive": {
+      "ms": 299,
+      "logs": [
+        {
+          "msg": "✓ Archive entry created for 2026-08-14",
+          "level": "info"
+        }
+      ],
+      "output": {
+        "archive_result": "## ✅ Archive Success\n\n**Saved:** 2026-08-14\n\n```json\n{\n  \"date\": \"2026-08-14\",\n  \"usd_idr\": 17876.326857,\n  \"usd_eur\": 0.867144,\n  \"source\": \"open.er-api.com\",\n  \"archived_at\": \"2026-08-14T23:05:51.768Z\"\n}\n```\n\n**Simulated path:** `/archive/exchange-rates/2026-08-14.json`\n\n**Status:** Stored in memory (simulate)\n- USD→IDR: 17.876,327\n- USD→EUR: 0.8671\n- Timestamp: 2026-08-14T23:05:51.768Z\n\n---\n\n✨ Ready to view di morning report!\n"
+      },
+      "source": "const today = inputs.timestamp.split('T')[0];\nconst archiveEntry = {\n  date: today,\n  usd_idr: inputs.rate_idr,\n  usd_eur: inputs.rate_eur,\n  source: inputs.source,\n  archived_at: new Date().toISOString(),\n};\n\n// Simulasi: pretend save ke file\n// Dalam production: append ke database atau write file\nconst simulatedFilePath = `/archive/exchange-rates/${today}.json`;\n\nconst archive_result = `## ✅ Archive Success\n\n**Saved:** ${today}\n\n\\`\\`\\`json\n${JSON.stringify(archiveEntry, null, 2)}\n\\`\\`\\`\n\n**Simulated path:** \\`${simulatedFilePath}\\`\n\n**Status:** Stored in memory (simulate)\n- USD→IDR: ${archiveEntry.usd_idr.toLocaleString('id-ID')}\n- USD→EUR: ${archiveEntry.usd_eur.toFixed(4)}\n- Timestamp: ${archiveEntry.archived_at}\n\n---\n\n✨ Ready to view di morning report!\n`;\n\nconsole.log(`✓ Archive entry created for ${today}`);\nreturn { archive_result };",
+      "written": [
+        "archive_result"
+      ]
+    }
+  }
+}

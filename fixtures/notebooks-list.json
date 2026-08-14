@@ -1,0 +1,153 @@
+[
+  {
+    "id": "8aee2070-007a-4a67-984e-3df3e5c641b1",
+    "name": "archive-exchange-rates",
+    "runtime": "node",
+    "created_at": "2026-08-03T13:22:38.756Z",
+    "updated_at": "2026-08-12T15:55:05.850Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-08T22:40:14.946Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "52cc6e6b-26e3-4407-b60a-13f000679449",
+    "name": "zz-uji-paralel-3",
+    "runtime": "node",
+    "created_at": "2026-08-08T18:25:41.286Z",
+    "updated_at": "2026-08-12T15:33:08.290Z",
+    "deployed": true,
+    "tags": [
+      "test",
+      "part-k"
+    ],
+    "last_run_at": "2026-08-08T18:44:27.963Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-written-id",
+    "name": "zz-files-written",
+    "runtime": "node",
+    "created_at": "2026-08-06T08:03:07.726Z",
+    "updated_at": "2026-08-10T14:51:57.426Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-06T08:10:11.509Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-open-hook-id",
+    "name": "zz-files-open-hook",
+    "runtime": "node",
+    "created_at": "2026-08-06T08:03:07.546Z",
+    "updated_at": "2026-08-10T14:51:57.232Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": null,
+    "last_run_status": null,
+    "trigger_kinds": [
+      "webhook"
+    ]
+  },
+  {
+    "id": "zz-files-hook-id",
+    "name": "zz-files-hook",
+    "runtime": "node",
+    "created_at": "2026-08-06T08:03:07.528Z",
+    "updated_at": "2026-08-10T14:51:57.213Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-10T14:51:57.284Z",
+    "last_run_status": "success",
+    "trigger_kinds": [
+      "webhook"
+    ]
+  },
+  {
+    "id": "zz-files-refuser-id",
+    "name": "zz-files-refuser",
+    "runtime": "node",
+    "created_at": "2026-08-06T08:03:07.504Z",
+    "updated_at": "2026-08-10T14:51:57.186Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": null,
+    "last_run_status": null,
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-reader-id",
+    "name": "zz-files-reader",
+    "runtime": "node",
+    "created_at": "2026-08-06T08:03:07.356Z",
+    "updated_at": "2026-08-10T14:51:57.030Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-10T14:51:57.046Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-huge-id",
+    "name": "zz-files-huge",
+    "runtime": "node",
+    "created_at": "2026-08-04T12:58:21.116Z",
+    "updated_at": "2026-08-10T14:51:56.835Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-10T14:51:56.852Z",
+    "last_run_status": "failed",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-escape-id",
+    "name": "zz-files-escape",
+    "runtime": "node",
+    "created_at": "2026-08-04T12:58:20.965Z",
+    "updated_at": "2026-08-10T14:51:56.673Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-10T14:51:56.690Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-files-writer-id",
+    "name": "zz-files-writer",
+    "runtime": "node",
+    "created_at": "2026-08-04T12:58:20.341Z",
+    "updated_at": "2026-08-10T14:51:56.002Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": "2026-08-10T14:51:56.516Z",
+    "last_run_status": "success",
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-act-caller-silent-id",
+    "name": "zz-act-caller-silent",
+    "runtime": "node",
+    "created_at": "2026-08-04T09:27:59.065Z",
+    "updated_at": "2026-08-10T14:51:39.347Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": null,
+    "last_run_status": null,
+    "trigger_kinds": []
+  },
+  {
+    "id": "zz-act-silent-id",
+    "name": "zz-act-silent",
+    "runtime": "node",
+    "created_at": "2026-08-04T09:27:59.049Z",
+    "updated_at": "2026-08-10T14:51:39.333Z",
+    "deployed": true,
+    "tags": [],
+    "last_run_at": null,
+    "last_run_status": null,
+    "trigger_kinds": []
+  }
+]

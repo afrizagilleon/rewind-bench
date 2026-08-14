@@ -1,0 +1,16 @@
+# Credentials — never commit. The Featherless key in .env is a live paid credential
+# and a public repo is harvested by bots within minutes.
+.env
+.env.*
+!.env.example
+
+# Internal working documents — build specs handed to the executor, not part of
+# the deliverable. Kept on disk so the executor can read them; never committed.
+CONTRACTS.md
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Raw ledger output can get large; results/*.jsonl summaries ARE committed as evidence.
+results/**/*.raw.jsonl

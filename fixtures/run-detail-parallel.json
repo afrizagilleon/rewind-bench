@@ -1,0 +1,138 @@
+{
+  "id": "563a15e9-21c8-4123-84e3-1ad2480a68c6",
+  "notebook_id": "52cc6e6b-26e3-4407-b60a-13f000679449",
+  "status": "success",
+  "trigger_source": "manual",
+  "cell_id": null,
+  "parent_run_id": null,
+  "error": null,
+  "started_at": "2026-08-14T23:05:49.239Z",
+  "finished_at": "2026-08-14T23:05:50.408Z",
+  "cell_results": {
+    "046fe5be-e251-4c19-8eed-ed023a359abb": {
+      "ms": 216,
+      "output": {
+        "b1a": {
+          "lane": "B.1",
+          "level": 2
+        }
+      },
+      "source": "return { b1a: { lane: 'B.1', level: 2 } };",
+      "written": [
+        "b1a"
+      ]
+    },
+    "056af417-d3eb-41dd-93fd-8ee3dc8a0d01": {
+      "ms": 213,
+      "output": {
+        "b2a": {
+          "lane": "B.2",
+          "level": 2
+        }
+      },
+      "source": "return { b2a: { lane: 'B.2', level: 2 } };",
+      "written": [
+        "b2a"
+      ]
+    },
+    "1a28481b-ce35-47ed-982f-a60658eb91e9": {
+      "ms": 224,
+      "output": {
+        "b1": {
+          "lane": "B",
+          "level": 1
+        }
+      },
+      "source": "return { b1: { lane: 'B', level: 1 } };",
+      "written": [
+        "b1"
+      ]
+    },
+    "4fcdea6b-5b72-4986-b358-b642bfe6764f": {
+      "ms": 222,
+      "output": {
+        "c1": {
+          "lane": "B.2.i",
+          "level": 3
+        }
+      },
+      "source": "return { c1: { lane: 'B.2.i', level: 3 } };",
+      "written": [
+        "c1"
+      ]
+    },
+    "673ad773-5fe5-405f-9857-24c8764312f0": {
+      "ms": 204,
+      "output": {
+        "results": [
+          {
+            "lane": "A",
+            "level": 1
+          },
+          {
+            "lane": "B",
+            "level": 1
+          },
+          {
+            "lane": "B.1",
+            "level": 2
+          },
+          {
+            "lane": "B.2",
+            "level": 2
+          },
+          {
+            "lane": "B.2.i",
+            "level": 3
+          },
+          {
+            "lane": "B.2.ii",
+            "level": 3
+          }
+        ],
+        "summary": "## Complete\n\n6 of 6 lanes wrote. Deepest level reached: **3**.\n\nAll three levels ran and their results were merged back."
+      },
+      "source": "const results = [inputs.a1, inputs.b1, inputs.b1a, inputs.b2a, inputs.c1, inputs.c2]\n  .filter(Boolean)\n  .sort((x, y) => x.level - y.level || x.lane.localeCompare(y.lane));\n\nconst deepestLevel = results.reduce((m, r) => Math.max(m, r.level), 0);\nconst complete = results.length === 6 && deepestLevel === 3;\n\nconst summary = [\n  `## ${complete ? 'Complete' : 'NOT complete'}`,\n  '',\n  `${results.length} of 6 lanes wrote. Deepest level reached: **${deepestLevel}**.`,\n  '',\n  complete\n    ? 'All three levels ran and their results were merged back.'\n    : \"A lane's write did not arrive. That is a finding — note which lane is missing from the table.\",\n].join('\\n');\n\nreturn { results, summary };",
+      "written": [
+        "results",
+        "summary"
+      ]
+    },
+    "7ca0c627-c5b2-40be-8d58-02885a5290a2": {
+      "ms": 220,
+      "output": {
+        "c2": {
+          "lane": "B.2.ii",
+          "level": 3
+        }
+      },
+      "source": "return { c2: { lane: 'B.2.ii', level: 3 } };",
+      "written": [
+        "c2"
+      ]
+    },
+    "a547f958-3a34-4d16-83d7-d38565025db3": {
+      "ms": 292,
+      "output": {
+        "started": 1786748749586
+      },
+      "source": "return { started: Date.now() };",
+      "written": [
+        "started"
+      ]
+    },
+    "d4f80f1b-b2c8-4e7c-a87c-5103d6b386ac": {
+      "ms": 224,
+      "output": {
+        "a1": {
+          "lane": "A",
+          "level": 1
+        }
+      },
+      "source": "return { a1: { lane: 'A', level: 1 } };",
+      "written": [
+        "a1"
+      ]
+    }
+  }
+}

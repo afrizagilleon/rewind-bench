@@ -1,0 +1,29 @@
+{
+  "id": "55711018-c07e-44e4-812f-1f7954cc733a",
+  "notebook_id": "8aee2070-007a-4a67-984e-3df3e5c641b1",
+  "status": "success",
+  "trigger_source": "cell",
+  "cell_id": "fetch-rates",
+  "parent_run_id": null,
+  "error": null,
+  "started_at": "2026-08-14T23:05:51.944Z",
+  "finished_at": "2026-08-14T23:05:52.495Z",
+  "cell_results": {
+    "fetch-rates": {
+      "ms": 525,
+      "output": {
+        "source": "open.er-api.com",
+        "rate_eur": 0.867144,
+        "rate_idr": 17876.326857,
+        "timestamp": "2026-08-14T23:05:52.534Z"
+      },
+      "source": "const sources = [\n  {\n    name: 'open.er-api.com',\n    url: 'https://open.er-api.com/v6/latest/USD',\n    pick: (d) => d?.rates,\n  },\n];\n\nconst errors = [];\nfor (const s of sources) {\n  try {\n    const res = await fetch(s.url);\n    if (!res.ok) throw new Error(`HTTP ${res.status}`);\n    const data = await res.json();\n    const rates = s.pick(data);\n    if (!rates?.IDR || !rates?.EUR) throw new Error('Rates not found');\n    return { \n      rate_idr: rates.IDR, \n      rate_eur: rates.EUR, \n      source: s.name,\n      timestamp: new Date().toISOString()\n    };\n  } catch (err) {\n    errors.push(`${s.name}: ${err.message}`);\n  }\n}\nthrow new Error(`Fetch failed — ${errors.join(' | ')}`);",
+      "written": [
+        "rate_idr",
+        "rate_eur",
+        "source",
+        "timestamp"
+      ]
+    }
+  }
+}

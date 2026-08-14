@@ -1,0 +1,152 @@
+{
+  "version": "1.0",
+  "id": "52cc6e6b-26e3-4407-b60a-13f000679449",
+  "name": "zz-uji-paralel-3",
+  "runtime": "node",
+  "steps": [
+    {
+      "id": "a547f958-3a34-4d16-83d7-d38565025db3",
+      "kind": "cell",
+      "note": "# Three-level parallel (F-128)\n\nLane inside lane inside lane. A parallel group cannot sit directly inside another\nparallel group — it has to go through a lane — so three levels means three nested lanes.\n\nWhat this checks: whether each lane's writes are actually merged back once all of them\nfinish, and whether the deepest level is read too.",
+      "code": "return { started: Date.now() };",
+      "author": {
+        "by": "translation-script",
+        "at": "2026-08-12T15:33:08.440Z"
+      }
+    },
+    {
+      "id": "5761f397-5b21-4250-993c-77b2bde934ce",
+      "kind": "parallel",
+      "lanes": [
+        {
+          "id": "01fe8230-229d-4fed-ae26-99c732b573a3",
+          "steps": [
+            {
+              "id": "d4f80f1b-b2c8-4e7c-a87c-5103d6b386ac",
+              "kind": "cell",
+              "code": "return { a1: { lane: 'A', level: 1 } };",
+              "author": {
+                "by": "translation-script",
+                "at": "2026-08-12T15:33:08.440Z"
+              }
+            }
+          ],
+          "label": "A — level 1"
+        },
+        {
+          "id": "1dfeb36b-2152-40fa-aab1-1445acf42919",
+          "steps": [
+            {
+              "id": "1a28481b-ce35-47ed-982f-a60658eb91e9",
+              "kind": "cell",
+              "code": "return { b1: { lane: 'B', level: 1 } };",
+              "author": {
+                "by": "translation-script",
+                "at": "2026-08-12T15:33:08.440Z"
+              }
+            },
+            {
+              "id": "563b440a-0c0e-47a4-b9bc-7154c00ee2c1",
+              "kind": "parallel",
+              "lanes": [
+                {
+                  "id": "67e5212c-a073-479b-bfdd-970c76c715b5",
+                  "steps": [
+                    {
+                      "id": "046fe5be-e251-4c19-8eed-ed023a359abb",
+                      "kind": "cell",
+                      "code": "return { b1a: { lane: 'B.1', level: 2 } };",
+                      "author": {
+                        "by": "translation-script",
+                        "at": "2026-08-12T15:33:08.440Z"
+                      }
+                    }
+                  ],
+                  "label": "B.1 — level 2"
+                },
+                {
+                  "id": "413eaa68-8b6a-4941-8f4a-8d180495d3ef",
+                  "steps": [
+                    {
+                      "id": "056af417-d3eb-41dd-93fd-8ee3dc8a0d01",
+                      "kind": "cell",
+                      "code": "return { b2a: { lane: 'B.2', level: 2 } };",
+                      "author": {
+                        "by": "translation-script",
+                        "at": "2026-08-12T15:33:08.440Z"
+                      }
+                    },
+                    {
+                      "id": "6332634b-f174-44b5-94aa-5f389e5d5b44",
+                      "kind": "parallel",
+                      "lanes": [
+                        {
+                          "id": "0671578e-6e70-425d-93bd-f527d1055939",
+                          "steps": [
+                            {
+                              "id": "4fcdea6b-5b72-4986-b358-b642bfe6764f",
+                              "kind": "cell",
+                              "code": "return { c1: { lane: 'B.2.i', level: 3 } };",
+                              "author": {
+                                "by": "translation-script",
+                                "at": "2026-08-12T15:33:08.440Z"
+                              }
+                            }
+                          ],
+                          "label": "B.2.i — level 3"
+                        },
+                        {
+                          "id": "44c64bca-3d27-457f-a2c5-c5f0f1879f55",
+                          "steps": [
+                            {
+                              "id": "7ca0c627-c5b2-40be-8d58-02885a5290a2",
+                              "kind": "cell",
+                              "code": "return { c2: { lane: 'B.2.ii', level: 3 } };",
+                              "author": {
+                                "by": "translation-script",
+                                "at": "2026-08-12T15:33:08.440Z"
+                              }
+                            }
+                          ],
+                          "label": "B.2.ii — level 3"
+                        }
+                      ]
+                    }
+                  ],
+                  "label": "B.2 — level 2, branches again"
+                }
+              ]
+            }
+          ],
+          "label": "B — level 1, branches again"
+        }
+      ]
+    },
+    {
+      "id": "673ad773-5fe5-405f-9857-24c8764312f0",
+      "kind": "cell",
+      "note": "All lanes have finished and what they wrote has been merged back. This cell reads it.",
+      "code": "const results = [inputs.a1, inputs.b1, inputs.b1a, inputs.b2a, inputs.c1, inputs.c2]\n  .filter(Boolean)\n  .sort((x, y) => x.level - y.level || x.lane.localeCompare(y.lane));\n\nconst deepestLevel = results.reduce((m, r) => Math.max(m, r.level), 0);\nconst complete = results.length === 6 && deepestLevel === 3;\n\nconst summary = [\n  `## ${complete ? 'Complete' : 'NOT complete'}`,\n  '',\n  `${results.length} of 6 lanes wrote. Deepest level reached: **${deepestLevel}**.`,\n  '',\n  complete\n    ? 'All three levels ran and their results were merged back.'\n    : \"A lane's write did not arrive. That is a finding — note which lane is missing from the table.\",\n].join('\\n');\n\nreturn { results, summary };",
+      "author": {
+        "by": "translation-script",
+        "at": "2026-08-12T15:33:08.440Z"
+      }
+    }
+  ],
+  "tags": [
+    "test",
+    "part-k"
+  ],
+  "outputs": [
+    {
+      "name": "summary",
+      "description": "Whether all three levels actually ran",
+      "render": "markdown"
+    },
+    {
+      "name": "results",
+      "description": "One row per lane, across all levels",
+      "render": "table"
+    }
+  ]
+}
