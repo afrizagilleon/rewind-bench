@@ -1,14 +1,15 @@
 /**
- * Arm Types & Definitions (R6 & R6.1)
+ * Arm Types & Definitions (R6 & R6.1 & R5.1)
  */
 
-import type { Mutation } from "../mutate";
+import type { Mutation, Stratum } from "../mutate";
 
 export type StopReason = "finished" | "max-turns" | "protocol" | "length";
 
 export interface ArmResult {
   arm: "monolithic" | "stepwise" | "rewind";
   mutationId: string;
+  stratum: Stratum;
   model: string;
 
   editedCells: string[];
@@ -33,7 +34,7 @@ export interface ArmContext {
   scratchNotebookDoc: any;
   originalDoc: any;
   baselineRun: any;
-  actualRun: any; // Run outcome of mutated scratch notebook before agent repair
+  actualRun: any;
   saveScratchDoc: (doc: any) => Promise<void>;
   runScratchCell: (cellId: string, input?: Record<string, unknown>) => Promise<{ output?: unknown; error?: string }>;
   model?: string;

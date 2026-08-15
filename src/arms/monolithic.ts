@@ -163,6 +163,7 @@ Locate the bug causing the discrepancy, fix it using notebook_edit_cell, and fin
   return {
     arm: "monolithic",
     mutationId: mutation.id,
+    stratum: mutation.stratum || (mutation.kind === "key-rename" ? "name-level" : "value-level"),
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,

@@ -171,6 +171,7 @@ Investigate the cells, diagnose the failure, fix the bug with notebook_edit_cell
   return {
     arm: "stepwise",
     mutationId: mutation.id,
+    stratum: mutation.stratum || (mutation.kind === "key-rename" ? "name-level" : "value-level"),
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,

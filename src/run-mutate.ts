@@ -1,13 +1,14 @@
 /**
- * CLI Runner for Mutation Engine (R5)
+ * CLI Runner for Mutation Engine (R5 & R5.1)
  *
  * Generates and validates synthetic bugs against deterministic cells from H4.
  * Enforces two-layer validation (Syntax & Behavioral Deviation) using temporary
  * scratch notebooks (zz-rewind-scratch-<uuid8>) and cleans them up in finally.
+ * Enforces R5.1 stratum balance: value-level >= 30, name-level <= 20, max 3 per notebook.
  *
  * Usage:
+ *   npm run mutate
  *   npm run mutate -- --limit=50
- *   npm run mutate -- --kinds=key-rename,off-by-one --limit=10
  *   npm run mutate -- --cleanup
  */
 
@@ -17,8 +18,10 @@ import {
   mutationsFor,
   appendMutation,
   loadDeterministicCells,
+  stratumForKind,
   type Mutation,
   type MutationKind,
+  type Stratum,
 } from "./mutate";
 import { hashValue } from "./ledger";
 import { join } from "node:path";
@@ -74,7 +77,6 @@ async function saveNotebookDoc(doc: any): Promise<any> {
 }
 
 async function deleteNotebook(notebookId: string, name?: string): Promise<void> {
-  // Safety check: ensure scratch notebook name starts with zz-rewind-scratch- or is temporary copy
   if (name && !name.startsWith("zz-rewind-scratch-") && !name.endsWith("-copy")) {
     console.error(`Safety refusal: refusing to delete non-scratch notebook "${name}" (${notebookId})`);
     return;
@@ -196,6 +198,8 @@ async function main() {
 
   let limit = 50;
   let maxPerNotebook = 3;
+  let maxNameLevel = 20;
+  let minTargetValueLevel = 30;
   let allowedKinds: Set<MutationKind> | null = null;
   const isFresh = args.includes("--fresh") || !args.some((a) => a.startsWith("--limit="));
 
@@ -231,9 +235,10 @@ async function main() {
   }
 
   console.log("=======================================================");
-  console.log("R5 — MUTATION ENGINE (Ground Truth)");
+  console.log("R5.1 — MUTATION ENGINE (Stratified Ground Truth)");
   console.log("=======================================================");
   console.log(`Target verified limit: ${limit}`);
+  console.log(`Stratum balance:       value-level >= ${minTargetValueLevel}, name-level <= ${maxNameLevel}`);
   console.log(`Max per notebook:      ${maxPerNotebook}`);
   if (allowedKinds) {
     console.log(`Allowed kinds:         ${Array.from(allowedKinds).join(", ")}`);
@@ -250,19 +255,26 @@ async function main() {
   }
 
   const allNotebooks = await listNotebooks();
-  // Filter out any scratch notebooks
   const notebooks = allNotebooks.filter(
     (nb) => !nb.name.startsWith("zz-rewind-scratch-") && !nb.name.endsWith("-copy")
   );
 
   let totalCandidatesGenerated = 0;
   let totalValidatedMutations = 0;
+  let totalNameLevel = 0;
+  let totalValueLevel = 0;
+
   const kindStats: Record<MutationKind, { generated: number; validated: number }> = {
     "key-rename": { generated: 0, validated: 0 },
     "off-by-one": { generated: 0, validated: 0 },
     "operand-swap": { generated: 0, validated: 0 },
     "dropped-await": { generated: 0, validated: 0 },
     "type-coercion": { generated: 0, validated: 0 },
+    "arith-swap": { generated: 0, validated: 0 },
+    "const-perturb": { generated: 0, validated: 0 },
+    "comparison-flip": { generated: 0, validated: 0 },
+    "index-shift": { generated: 0, validated: 0 },
+    "filter-invert": { generated: 0, validated: 0 },
   };
 
   const validatedByNotebook: Record<string, number> = {};
@@ -319,11 +331,25 @@ async function main() {
 
         // Generate Layer-1 syntax valid candidates
         const rawCandidates = mutationsFor(nb.id, nb.name, cell.id, cell.code);
+        // Prioritize value-level candidates so value-level reaches target >= 30
+        const sortedCandidates = rawCandidates.sort((a, b) => {
+          if (a.kind === "key-rename" && b.kind !== "key-rename") return 1;
+          if (a.kind !== "key-rename" && b.kind === "key-rename") return -1;
+          return 0;
+        });
+
         const candidates = allowedKinds
-          ? rawCandidates.filter((m) => allowedKinds!.has(m.kind))
-          : rawCandidates;
+          ? sortedCandidates.filter((m) => allowedKinds!.has(m.kind))
+          : sortedCandidates;
 
         for (const candidate of candidates) {
+          const stratum = stratumForKind(candidate.kind);
+
+          // Stratum limit guards: don't exceed maxNameLevel for name-level
+          if (stratum === "name-level" && totalNameLevel >= maxNameLevel) {
+            continue;
+          }
+
           kindStats[candidate.kind].generated++;
           totalCandidatesGenerated++;
 
@@ -370,6 +396,7 @@ async function main() {
             if (behavioralDeviation) {
               const verifiedMutation: Mutation = {
                 ...candidate,
+                stratum,
                 baselineHash,
                 mutantHash,
                 mutantErrored,
@@ -379,11 +406,14 @@ async function main() {
               totalValidatedMutations++;
               nbValidatedCount++;
               kindStats[candidate.kind].validated++;
+              if (stratum === "name-level") totalNameLevel++;
+              else totalValueLevel++;
+
               validatedByNotebook[nb.name] = (validatedByNotebook[nb.name] || 0) + 1;
 
               const errNote = mutantErrored ? " [crashed]" : "";
               console.log(
-                `  ✓ [${candidate.kind}] ${cell.id}: ${candidate.description}${errNote}`
+                `  ✓ [${candidate.kind} | ${stratum}] ${cell.id}: ${candidate.description}${errNote}`
               );
             } else {
               console.log(
@@ -411,16 +441,19 @@ async function main() {
       : "0";
 
   console.log("\n" + "=".repeat(60));
-  console.log("MUTATION ENGINE SUMMARY (R5 Ground Truth)");
+  console.log("MUTATION ENGINE SUMMARY (R5.1 Stratified Ground Truth)");
   console.log("=".repeat(60));
   console.log(`Candidates generated (Layer 1 syntax): ${totalCandidatesGenerated}`);
   console.log(`Validated mutations (Layer 2 behavior): ${totalValidatedMutations}`);
+  console.log(`  - Value-level stratum:               ${totalValueLevel} (target >= 30)`);
+  console.log(`  - Name-level stratum (control):      ${totalNameLevel} (target <= 20)`);
   console.log(`Behavioral validation rate:            ${passRate}%`);
   console.log("\nBreakdown by Mutation Kind:");
   for (const [k, stats] of Object.entries(kindStats) as [MutationKind, { generated: number; validated: number }][]) {
     const rate = stats.generated > 0 ? ((stats.validated / stats.generated) * 100).toFixed(1) : "0";
+    const stratum = stratumForKind(k);
     console.log(
-      `  ${k.padEnd(16)}: ${String(stats.validated).padStart(3)} / ${String(stats.generated).padStart(3)} validated (${rate}%)`
+      `  ${k.padEnd(16)} [${stratum.padEnd(11)}]: ${String(stats.validated).padStart(3)} / ${String(stats.generated).padStart(3)} validated (${rate}%)`
     );
   }
   console.log("\nBreakdown by Notebook:");

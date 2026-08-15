@@ -213,6 +213,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
   return {
     arm: "rewind",
     mutationId: mutation.id,
+    stratum: mutation.stratum || (mutation.kind === "key-rename" ? "name-level" : "value-level"),
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,

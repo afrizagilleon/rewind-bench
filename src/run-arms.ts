@@ -1,16 +1,17 @@
 /**
- * CLI Runner for Arms A/B/C (R6 & R6.1)
+ * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
  * Supplies concrete symptoms (expected vs actual outputs) and full cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
  * Saves transcripts to results/transcripts/<arm>-<mutationId>.json and appends records to results/arms.jsonl.
+ * Reports summary across three strata: Overall, Name-level (Control), and Value-level (Hypothesis).
  *
  * Usage:
- *   npm run arms -- --smoke                  # 3 mutations × 3 arms
- *   npm run arms -- --limit=50               # full benchmark run
- *   npm run arms -- --arm=rewind --limit=10  # single arm
- *   npm run arms -- --cleanup                # remove any orphan zz-rewind-arm-*
+ *   npm run arms -- --smoke --stratum=value-level # 3 value-level mutations from 3 distinct notebooks
+ *   npm run arms -- --smoke                       # 3 mutations × 3 arms
+ *   npm run arms -- --limit=50                    # full benchmark run
+ *   npm run arms -- --cleanup                     # remove any orphan zz-rewind-arm-*
  */
 
 import { listNotebooks, getNotebook, runNotebook, requireEnv } from "./client";
@@ -18,7 +19,7 @@ import { runMonolithicArm } from "./arms/monolithic";
 import { runStepwiseArm } from "./arms/stepwise";
 import { runRewindArm } from "./arms/rewind";
 import type { ArmResult, ArmContext } from "./arms/types";
-import type { Mutation } from "./mutate";
+import { stratumForKind, type Mutation, type Stratum } from "./mutate";
 import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -177,6 +178,7 @@ function saveTranscript(transcriptsDir: string, arm: string, mutation: Mutation,
   const transcriptData = {
     arm: armResult.arm,
     mutationId: armResult.mutationId,
+    stratum: armResult.stratum,
     notebookId: mutation.notebookId,
     notebookName: mutation.notebookName,
     model: armResult.model,
@@ -204,7 +206,11 @@ function loadMutations(mutationsPath: string): Mutation[] {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      mutations.push(JSON.parse(line));
+      const m = JSON.parse(line);
+      if (!m.stratum) {
+        m.stratum = stratumForKind(m.kind);
+      }
+      mutations.push(m);
     } catch {
       // ignore
     }
@@ -236,6 +242,41 @@ function calculatePercentile(values: number[], percentile: number): number {
   return sorted[lower] * (1 - weight) + sorted[upper] * weight;
 }
 
+function printSummaryBlock(title: string, armRuns: ArmResult[], arms: string[]) {
+  console.log(`\n--- ${title} ---`);
+  for (const arm of arms) {
+    const runs = armRuns.filter((r) => r.arm === arm);
+    const total = runs.length;
+    if (total === 0) {
+      console.log(`  Arm ${arm.toUpperCase()}: no runs`);
+      continue;
+    }
+
+    const resolved = runs.filter((r) => r.resolved).length;
+    const lucky = runs.filter((r) => r.luckyPass).length;
+    const protoFails = runs.filter((r) => r.protocolFailure).length;
+    const lengthFails = runs.filter((r) => r.lengthFailure).length;
+    const stopReasonCounts = runs.reduce((acc: Record<string, number>, r) => {
+      acc[r.stopReason] = (acc[r.stopReason] || 0) + 1;
+      return acc;
+    }, {});
+    const avgTurns = (runs.reduce((sum, r) => sum + r.turns, 0) / total).toFixed(1);
+    const avgPrompt = Math.round(runs.reduce((sum, r) => sum + r.promptTokens, 0) / total);
+    const avgReasoning = Math.round(runs.reduce((sum, r) => sum + r.reasoningTokens, 0) / total);
+    const avgAnswer = Math.round(runs.reduce((sum, r) => sum + r.answerTokens, 0) / total);
+
+    console.log(`  Arm: ${arm.toUpperCase()}`);
+    console.log(`    Total runs:        ${total}`);
+    console.log(`    Resolved:          ${resolved} / ${total} (${((resolved / total) * 100).toFixed(1)}%)`);
+    console.log(`    Lucky passes:      ${lucky}`);
+    console.log(`    Protocol failures: ${protoFails}`);
+    console.log(`    Length failures:   ${lengthFails}`);
+    console.log(`    Stop reasons:      ${JSON.stringify(stopReasonCounts)}`);
+    console.log(`    Avg turns:         ${avgTurns}`);
+    console.log(`    Avg tokens:        prompt=${avgPrompt}, reasoning=${avgReasoning}, ans=${avgAnswer}`);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -247,6 +288,7 @@ async function main() {
   const isSmoke = args.includes("--smoke");
   let limit = isSmoke ? 3 : 50;
   let targetArm: "monolithic" | "stepwise" | "rewind" | null = null;
+  let targetStratum: Stratum | null = null;
 
   for (const arg of args) {
     if (arg.startsWith("--limit=")) {
@@ -254,6 +296,9 @@ async function main() {
     }
     if (arg.startsWith("--arm=")) {
       targetArm = arg.split("=")[1] as "monolithic" | "stepwise" | "rewind";
+    }
+    if (arg.startsWith("--stratum=")) {
+      targetStratum = arg.split("=")[1] as Stratum;
     }
   }
 
@@ -271,7 +316,33 @@ async function main() {
     process.exit(1);
   }
 
-  const targetMutations = mutations.slice(0, limit);
+  let selectedMutations: Mutation[] = [];
+
+  if (isSmoke && targetStratum === "value-level") {
+    // Pick 3 value-level mutations from 3 distinct notebooks
+    const valueMutations = mutations.filter((m) => m.stratum === "value-level" || m.kind !== "key-rename");
+    const seenNotebooks = new Set<string>();
+    for (const m of valueMutations) {
+      if (!seenNotebooks.has(m.notebookId)) {
+        seenNotebooks.add(m.notebookId);
+        selectedMutations.push(m);
+        if (selectedMutations.length >= 3) break;
+      }
+    }
+    if (selectedMutations.length < 3) {
+      for (const m of valueMutations) {
+        if (!selectedMutations.includes(m)) {
+          selectedMutations.push(m);
+          if (selectedMutations.length >= 3) break;
+        }
+      }
+    }
+  } else if (targetStratum) {
+    selectedMutations = mutations.filter((m) => m.stratum === targetStratum).slice(0, limit);
+  } else {
+    selectedMutations = mutations.slice(0, limit);
+  }
+
   const armsToRun: Array<"monolithic" | "stepwise" | "rewind"> = targetArm
     ? [targetArm]
     : ["monolithic", "stepwise", "rewind"];
@@ -281,10 +352,13 @@ async function main() {
   const maxTurns = 15;
 
   console.log("=======================================================");
-  console.log("R6.1 — ARMS (A/B/C) EVALUATION BENCHMARK");
+  console.log("R6.1 & R5.1 — ARMS (A/B/C) EVALUATION BENCHMARK");
   console.log("=======================================================");
-  console.log(`Mode:            ${isSmoke ? "SMOKE RUN (3 mutations × 3 arms)" : "FULL BENCHMARK"}`);
-  console.log(`Target mutants:  ${targetMutations.length}`);
+  console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
+  console.log(`Target mutants:  ${selectedMutations.length}`);
+  if (targetStratum) {
+    console.log(`Target stratum:  ${targetStratum}`);
+  }
   console.log(`Arms to run:     ${armsToRun.join(", ")}`);
   console.log(`Model:           ${model}`);
   console.log(`Max tokens:      ${maxTokens}`);
@@ -295,15 +369,14 @@ async function main() {
   const results: ArmResult[] = [];
   const completionTokensList: number[] = [];
 
-  // Cache baseline runs and documents to avoid refetching
   const notebookCache: Record<string, { originalDoc: any; baselineRun: any }> = {};
 
-  for (let mIdx = 0; mIdx < targetMutations.length; mIdx++) {
-    const mutation = targetMutations[mIdx];
-    console.log(`\n[Mutation ${mIdx + 1}/${targetMutations.length}] ${mutation.id} (${mutation.notebookName})`);
-    console.log(`  Kind: ${mutation.kind} | Bug: ${mutation.description}`);
+  for (let mIdx = 0; mIdx < selectedMutations.length; mIdx++) {
+    const mutation = selectedMutations[mIdx];
+    const stratum = mutation.stratum || stratumForKind(mutation.kind);
+    console.log(`\n[Mutation ${mIdx + 1}/${selectedMutations.length}] ${mutation.id} (${mutation.notebookName})`);
+    console.log(`  Kind: ${mutation.kind} [${stratum}] | Bug: ${mutation.description}`);
 
-    // Load or cache baseline run
     if (!notebookCache[mutation.notebookId]) {
       try {
         const originalDoc = await getNotebook(mutation.notebookId);
@@ -388,7 +461,6 @@ async function main() {
       } catch (armErr) {
         console.log(`  -> Arm ${arm} failed with error: ${armErr}`);
       } finally {
-        // 6. Clean up scratch notebook
         if (scratchId) {
           await deleteNotebook(scratchId, scratchName);
         }
@@ -396,39 +468,14 @@ async function main() {
     }
   }
 
-  // Summary Metrics
+  // Summary Metrics — Three Distinct Blocks
   console.log("\n" + "=".repeat(65));
-  console.log("R6.1 BENCHMARK SUMMARY");
+  console.log("R6.1 & R5.1 BENCHMARK SUMMARY REPORT");
   console.log("=".repeat(65));
 
-  for (const arm of armsToRun) {
-    const armRuns = results.filter((r) => r.arm === arm);
-    const total = armRuns.length;
-    if (total === 0) continue;
-
-    const resolved = armRuns.filter((r) => r.resolved).length;
-    const lucky = armRuns.filter((r) => r.luckyPass).length;
-    const protoFails = armRuns.filter((r) => r.protocolFailure).length;
-    const lengthFails = armRuns.filter((r) => r.lengthFailure).length;
-    const stopReasonCounts = armRuns.reduce((acc: Record<string, number>, r) => {
-      acc[r.stopReason] = (acc[r.stopReason] || 0) + 1;
-      return acc;
-    }, {});
-    const avgTurns = (armRuns.reduce((sum, r) => sum + r.turns, 0) / total).toFixed(1);
-    const avgPrompt = Math.round(armRuns.reduce((sum, r) => sum + r.promptTokens, 0) / total);
-    const avgReasoning = Math.round(armRuns.reduce((sum, r) => sum + r.reasoningTokens, 0) / total);
-    const avgAnswer = Math.round(armRuns.reduce((sum, r) => sum + r.answerTokens, 0) / total);
-
-    console.log(`\nArm: ${arm.toUpperCase()}`);
-    console.log(`  Total runs:        ${total}`);
-    console.log(`  Resolved:          ${resolved} / ${total} (${((resolved / total) * 100).toFixed(1)}%)`);
-    console.log(`  Lucky passes:      ${lucky}`);
-    console.log(`  Protocol failures: ${protoFails}`);
-    console.log(`  Length failures:   ${lengthFails}`);
-    console.log(`  Stop reasons:      ${JSON.stringify(stopReasonCounts)}`);
-    console.log(`  Avg turns:         ${avgTurns}`);
-    console.log(`  Avg tokens:        prompt=${avgPrompt}, reasoning=${avgReasoning}, ans=${avgAnswer}`);
-  }
+  printSummaryBlock("BLOCK 1: OVERALL STRATUM", results, armsToRun);
+  printSummaryBlock("BLOCK 2: NAME-LEVEL STRATUM (Control)", results.filter((r) => r.stratum === "name-level"), armsToRun);
+  printSummaryBlock("BLOCK 3: VALUE-LEVEL STRATUM (Hypothesis)", results.filter((r) => r.stratum === "value-level"), armsToRun);
 
   // Completion tokens distribution
   if (completionTokensList.length > 0) {

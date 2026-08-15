@@ -1,12 +1,19 @@
 /**
- * Mutation Engine (R5 / Ground Truth)
+ * Mutation Engine (R5 & R5.1 / Ground Truth)
  *
- * Generates synthetic single-point bugs using acorn AST transformations across 5 kinds:
- * - off-by-one
+ * Generates synthetic single-point bugs using acorn AST transformations across 10 kinds:
+ * Name-level:
  * - key-rename
+ * Value-level:
+ * - off-by-one
  * - operand-swap
  * - dropped-await
  * - type-coercion
+ * - arith-swap
+ * - const-perturb
+ * - comparison-flip
+ * - index-shift
+ * - filter-invert
  *
  * Implements two-layer validation (syntax parsing and empirical behavioral deviation)
  * using temporary scratch notebooks (zz-rewind-scratch-*) to protect user data.
@@ -19,15 +26,27 @@ import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type MutationKind =
-  | "off-by-one"
   | "key-rename"
+  | "off-by-one"
   | "operand-swap"
   | "dropped-await"
-  | "type-coercion";
+  | "type-coercion"
+  | "arith-swap"
+  | "const-perturb"
+  | "comparison-flip"
+  | "index-shift"
+  | "filter-invert";
+
+export type Stratum = "name-level" | "value-level";
+
+export function stratumForKind(kind: MutationKind): Stratum {
+  return kind === "key-rename" ? "name-level" : "value-level";
+}
 
 export interface Mutation {
   id: string; // `${cellId}:${kind}:${index}`
   kind: MutationKind;
+  stratum?: Stratum;
   notebookId: string;
   notebookName: string;
   cellId: string;
@@ -117,11 +136,15 @@ export function mutationsFor(
     "operand-swap": 0,
     "dropped-await": 0,
     "type-coercion": 0,
+    "arith-swap": 0,
+    "const-perturb": 0,
+    "comparison-flip": 0,
+    "index-shift": 0,
+    "filter-invert": 0,
   };
 
   // Helper to check if node is inside a nested inner function
   function isInsideInnerFunction(ancestors: any[]): boolean {
-    // ancestors[0] is Program, ancestors[1] is FunctionDeclaration (__cell)
     for (let i = 2; i < ancestors.length - 1; i++) {
       const a = ancestors[i];
       if (
@@ -180,6 +203,7 @@ export function mutationsFor(
           mutations.push({
             id: `${cellId}:key-rename:${idx}`,
             kind: "key-rename",
+            stratum: "name-level",
             notebookId,
             notebookName,
             cellId,
@@ -192,46 +216,102 @@ export function mutationsFor(
       }
     },
 
-    // 2. BinaryExpression: off-by-one (<, <=, >, >=) & operand-swap (-, /, %, <, >)
+    // 2. BinaryExpression: off-by-one, operand-swap, arith-swap, comparison-flip
     BinaryExpression(node: any) {
       const op = node.operator;
+      const leftEnd = node.left.end - WRAPPER_OFFSET;
+      const rightStart = node.right.start - WRAPPER_OFFSET;
+      const opRegion = source.slice(leftEnd, rightStart);
+      const opIndexInRegion = opRegion.indexOf(op);
 
-      // 2a. off-by-one
-      let newOp: string | null = null;
-      if (op === "<") newOp = "<=";
-      else if (op === "<=") newOp = "<";
-      else if (op === ">") newOp = ">=";
-      else if (op === ">=") newOp = ">";
+      if (opIndexInRegion !== -1) {
+        const opStart = leftEnd + opIndexInRegion;
+        const opEnd = opStart + op.length;
 
-      if (newOp) {
-        const leftEnd = node.left.end - WRAPPER_OFFSET;
-        const rightStart = node.right.start - WRAPPER_OFFSET;
-        const opRegion = source.slice(leftEnd, rightStart);
-        const opIndexInRegion = opRegion.indexOf(op);
+        // 2a. off-by-one (< <-> <=, > <-> >=)
+        let offByOneOp: string | null = null;
+        if (op === "<") offByOneOp = "<=";
+        else if (op === "<=") offByOneOp = "<";
+        else if (op === ">") offByOneOp = ">=";
+        else if (op === ">=") offByOneOp = ">";
 
-        if (opIndexInRegion !== -1) {
-          const opStart = leftEnd + opIndexInRegion;
-          const opEnd = opStart + op.length;
-          const mutated = replaceSlice(source, opStart, opEnd, newOp);
-
+        if (offByOneOp) {
+          const mutated = replaceSlice(source, opStart, opEnd, offByOneOp);
           if (isValidSyntax(mutated)) {
             const idx = kindCounters["off-by-one"]++;
             mutations.push({
               id: `${cellId}:off-by-one:${idx}`,
               kind: "off-by-one",
+              stratum: "value-level",
               notebookId,
               notebookName,
               cellId,
               originalSource: source,
               mutatedSource: mutated,
-              description: `changed "${op}" to "${newOp}" in comparison`,
+              description: `changed "${op}" to "${offByOneOp}" in comparison`,
+              sourceHash,
+            });
+          }
+        }
+
+        // 2b. comparison-flip (=== <-> !==, == <-> !=, < <-> >, <= <-> >=)
+        let compFlipOp: string | null = null;
+        if (op === "===") compFlipOp = "!==";
+        else if (op === "!==") compFlipOp = "===";
+        else if (op === "==") compFlipOp = "!=";
+        else if (op === "!=") compFlipOp = "==";
+        else if (op === "<") compFlipOp = ">";
+        else if (op === ">") compFlipOp = "<";
+        else if (op === "<=") compFlipOp = ">=";
+        else if (op === ">=") compFlipOp = "<=";
+
+        if (compFlipOp) {
+          const mutated = replaceSlice(source, opStart, opEnd, compFlipOp);
+          if (isValidSyntax(mutated)) {
+            const idx = kindCounters["comparison-flip"]++;
+            mutations.push({
+              id: `${cellId}:comparison-flip:${idx}`,
+              kind: "comparison-flip",
+              stratum: "value-level",
+              notebookId,
+              notebookName,
+              cellId,
+              originalSource: source,
+              mutatedSource: mutated,
+              description: `flipped comparison operator "${op}" to "${compFlipOp}"`,
+              sourceHash,
+            });
+          }
+        }
+
+        // 2c. arith-swap (+ <-> -, * <-> /)
+        let arithOp: string | null = null;
+        if (op === "+") arithOp = "-";
+        else if (op === "-") arithOp = "+";
+        else if (op === "*") arithOp = "/";
+        else if (op === "/") arithOp = "*";
+
+        if (arithOp) {
+          const mutated = replaceSlice(source, opStart, opEnd, arithOp);
+          if (isValidSyntax(mutated)) {
+            const idx = kindCounters["arith-swap"]++;
+            mutations.push({
+              id: `${cellId}:arith-swap:${idx}`,
+              kind: "arith-swap",
+              stratum: "value-level",
+              notebookId,
+              notebookName,
+              cellId,
+              originalSource: source,
+              mutatedSource: mutated,
+              description: `swapped arithmetic operator "${op}" to "${arithOp}"`,
               sourceHash,
             });
           }
         }
       }
 
-      // 2b. operand-swap
+      // 2d. operand-swap: non-commutative (-, /, %, <, >)
       if (["-", "/", "%", "<", ">"].includes(op)) {
         const leftStart = node.left.start - WRAPPER_OFFSET;
         const leftEnd = node.left.end - WRAPPER_OFFSET;
@@ -250,6 +330,7 @@ export function mutationsFor(
           mutations.push({
             id: `${cellId}:operand-swap:${idx}`,
             kind: "operand-swap",
+            stratum: "value-level",
             notebookId,
             notebookName,
             cellId,
@@ -262,7 +343,7 @@ export function mutationsFor(
       }
     },
 
-    // 3. CallExpression: off-by-one (slice/substring/splice) & type-coercion (Number/String/parseInt/parseFloat)
+    // 3. CallExpression: off-by-one, type-coercion, filter-invert
     CallExpression(node: any) {
       // 3a. slice/substring/splice off-by-one
       if (
@@ -308,6 +389,7 @@ export function mutationsFor(
             mutations.push({
               id: `${cellId}:off-by-one:${idx}`,
               kind: "off-by-one",
+              stratum: "value-level",
               notebookId,
               notebookName,
               cellId,
@@ -343,6 +425,7 @@ export function mutationsFor(
           mutations.push({
             id: `${cellId}:type-coercion:${idx}`,
             kind: "type-coercion",
+            stratum: "value-level",
             notebookId,
             notebookName,
             cellId,
@@ -351,6 +434,41 @@ export function mutationsFor(
             description: `removed ${fnName}() coercion around "${arg0Str}"`,
             sourceHash,
           });
+        }
+      }
+
+      // 3c. filter-invert: .filter(x => ...), .find(x => ...), .some(x => ...), .every(x => ...)
+      if (
+        node.callee?.type === "MemberExpression" &&
+        !node.callee.computed &&
+        node.callee.property?.type === "Identifier" &&
+        ["filter", "find", "some", "every"].includes(node.callee.property.name) &&
+        node.arguments.length >= 1
+      ) {
+        const methodName = node.callee.property.name;
+        const cb = node.arguments[0];
+        if (cb.type === "ArrowFunctionExpression" && cb.body.type !== "BlockStatement") {
+          const bodyStart = cb.body.start - WRAPPER_OFFSET;
+          const bodyEnd = cb.body.end - WRAPPER_OFFSET;
+          const bodyStr = source.slice(bodyStart, bodyEnd);
+          const inverted = `!(${bodyStr})`;
+          const mutated = replaceSlice(source, bodyStart, bodyEnd, inverted);
+
+          if (isValidSyntax(mutated)) {
+            const idx = kindCounters["filter-invert"]++;
+            mutations.push({
+              id: `${cellId}:filter-invert:${idx}`,
+              kind: "filter-invert",
+              stratum: "value-level",
+              notebookId,
+              notebookName,
+              cellId,
+              originalSource: source,
+              mutatedSource: mutated,
+              description: `inverted predicate in ${methodName}() to "!(${bodyStr})"`,
+              sourceHash,
+            });
+          }
         }
       }
     },
@@ -371,6 +489,7 @@ export function mutationsFor(
         mutations.push({
           id: `${cellId}:dropped-await:${idx}`,
           kind: "dropped-await",
+          stratum: "value-level",
           notebookId,
           notebookName,
           cellId,
@@ -379,6 +498,87 @@ export function mutationsFor(
           description: `dropped await on "${argStr.slice(0, 30)}"`,
           sourceHash,
         });
+      }
+    },
+
+    // 5. const-perturb: Numeric literals and Boolean literals (excluding property keys)
+    Literal(node: any, ancestors: any[]) {
+      const parent = ancestors[ancestors.length - 2];
+      if (parent && parent.type === "Property" && parent.key === node && !parent.computed) {
+        return; // Don't mutate object property keys
+      }
+
+      let mutatedVal: string | null = null;
+      let desc = "";
+
+      if (typeof node.value === "number") {
+        const n = node.value;
+        const newN = n === 0 ? 1 : n === 1 ? 0 : n + 1;
+        mutatedVal = String(newN);
+        desc = `perturbed numeric constant from ${n} to ${newN}`;
+      } else if (typeof node.value === "boolean") {
+        mutatedVal = String(!node.value);
+        desc = `perturbed boolean constant from ${node.value} to ${!node.value}`;
+      }
+
+      if (mutatedVal !== null) {
+        const start = node.start - WRAPPER_OFFSET;
+        const end = node.end - WRAPPER_OFFSET;
+        const mutated = replaceSlice(source, start, end, mutatedVal);
+
+        if (isValidSyntax(mutated)) {
+          const idx = kindCounters["const-perturb"]++;
+          mutations.push({
+            id: `${cellId}:const-perturb:${idx}`,
+            kind: "const-perturb",
+            stratum: "value-level",
+            notebookId,
+            notebookName,
+            cellId,
+            originalSource: source,
+            mutatedSource: mutated,
+            description: desc,
+            sourceHash,
+          });
+        }
+      }
+    },
+
+    // 6. index-shift: computed member expression arr[i] -> arr[i + 1] or arr[0] -> arr[1]
+    MemberExpression(node: any) {
+      if (!node.computed || !node.property) return;
+      const prop = node.property;
+      let mutatedProp: string | null = null;
+      let desc = "";
+
+      if (prop.type === "Identifier") {
+        mutatedProp = `${prop.name} + 1`;
+        desc = `shifted index from "${prop.name}" to "${prop.name} + 1"`;
+      } else if (prop.type === "Literal" && typeof prop.value === "number") {
+        mutatedProp = String(prop.value + 1);
+        desc = `shifted index from "${prop.value}" to "${prop.value + 1}"`;
+      }
+
+      if (mutatedProp !== null) {
+        const start = prop.start - WRAPPER_OFFSET;
+        const end = prop.end - WRAPPER_OFFSET;
+        const mutated = replaceSlice(source, start, end, mutatedProp);
+
+        if (isValidSyntax(mutated)) {
+          const idx = kindCounters["index-shift"]++;
+          mutations.push({
+            id: `${cellId}:index-shift:${idx}`,
+            kind: "index-shift",
+            stratum: "value-level",
+            notebookId,
+            notebookName,
+            cellId,
+            originalSource: source,
+            mutatedSource: mutated,
+            description: desc,
+            sourceHash,
+          });
+        }
       }
     },
   });
