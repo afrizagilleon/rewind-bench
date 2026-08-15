@@ -26,7 +26,9 @@ export interface ArmResult {
   totalTokens: number;
 
   resolved: boolean;
-  luckyPass: boolean;
+  luckyPass: boolean | null;
+  offTargetFix: boolean;
+  heldOutHash?: string;
   protocolFailure: boolean;
   lengthFailure: boolean;
   scopeTruncated: boolean;

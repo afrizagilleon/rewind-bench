@@ -209,7 +209,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     const finalHash = hashValue(finalRun.output);
     resolved = finalHash === mutation.baselineHash;
   }
-  const luckyPass = resolved && !summary.editedCells.includes(mutation.cellId);
+  const offTargetFix = resolved && !summary.editedCells.includes(mutation.cellId);
   const hopDistance = mutation.hopDistance ?? 1;
   const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
   const distanceToTerminal = mutation.distanceToTerminal ?? 0;
@@ -233,7 +233,8 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     answerTokens: summary.answerTokens,
     totalTokens: summary.totalTokens,
     resolved,
-    luckyPass,
+    luckyPass: null,
+    offTargetFix,
     protocolFailure: summary.protocolFailure,
     lengthFailure: summary.lengthFailure,
     scopeTruncated: anyScopeTruncated || summary.scopeTruncated,

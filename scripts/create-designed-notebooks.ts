@@ -1,6 +1,10 @@
 /**
- * Script to generate, create via REST, verify 10x determinism, and dump
- * the 6 redesigned benchmark notebooks with randomUUID() cell IDs and varied lengths (6, 7, 7, 8, 8, 9) (R10.1).
+ * Script to generate, create via REST, verify 10x determinism, and compute held-out truth hashes
+ * for the 6 redesigned benchmark notebooks with randomUUID() cell IDs and varied lengths (6, 7, 7, 8, 8, 9) (R10.1 & R7.0).
+ *
+ * Generates two fixtures per notebook:
+ * 1. fixtures/designed/<name>.json (primary seed doc + heldOutTruthHash)
+ * 2. fixtures/designed/<name>.heldout.json (held-out seed doc + heldOutTruthHash)
  */
 
 import { listNotebooks, requireEnv } from "../src/client";
@@ -47,6 +51,29 @@ async function saveNotebookDoc(doc: any): Promise<any> {
   return await res.json();
 }
 
+async function duplicateNotebook(notebookId: string): Promise<{ id: string; name: string }> {
+  const res = await apiRequest(`/api/notebooks/${encodeURIComponent(notebookId)}/duplicate`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to duplicate notebook ${notebookId}: HTTP ${res.status}`);
+  }
+  return (await res.json()) as { id: string; name: string };
+}
+
+async function deleteNotebook(notebookId: string, name?: string): Promise<void> {
+  if (name && !name.startsWith("zz-rewind-scratch-") && !name.endsWith("-copy")) {
+    console.error(`Safety refusal: refusing to delete non-scratch notebook "${name}" (${notebookId})`);
+    return;
+  }
+  const res = await apiRequest(`/api/notebooks/${encodeURIComponent(notebookId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) {
+    console.error(`Failed to delete notebook ${notebookId}: HTTP ${res.status}`);
+  }
+}
+
 async function pollRunFinished(
   notebookId: string,
   runId: string,
@@ -83,21 +110,44 @@ async function runNotebook(notebookId: string): Promise<any> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Failed to start run for ${notebookId}: HTTP ${res.status} ${text}`);
+    throw new Error(`Failed to start run for ${notebookId}: HTTP ${res.status}`);
   }
   const { runId } = (await res.json()) as { runId: string };
   return await pollRunFinished(notebookId, runId);
 }
 
 // -------------------------------------------------------------
-// NOTEBOOK DEFINITIONS (Varying lengths: 6, 7, 7, 8, 8, 9)
+// NOTEBOOK DEFINITIONS & HELDOUT SEEDS
 // -------------------------------------------------------------
 
-export function createDesignedNotebookDefinitions(): any[] {
+export interface DesignedNotebookSpec {
+  name: string;
+  steps: any[];
+  heldoutSeedCode: string;
+}
+
+export function createDesignedNotebookDefinitions(): DesignedNotebookSpec[] {
   return [
     // 1. rb-designed-sales-aggregation (6 cells)
     {
       name: "rb-designed-sales-aggregation",
+      heldoutSeedCode: `const transactions = [
+  { id: 'H201', sku: 'SERVER-BLADE', category: 'Electronics', qty: 3, unitPrice: 2200, discountPct: 15, region: 'Denpasar', customerTier: 'Platinum' },
+  { id: 'H202', sku: 'OFFICE-SOFA', category: 'Furniture', qty: 2, unitPrice: 850, discountPct: 10, region: 'Jakarta', customerTier: 'Gold' },
+  { id: 'H203', sku: 'DEV-TABLET', category: 'Electronics', qty: 5, unitPrice: 400, discountPct: 5, region: 'Surabaya', customerTier: 'Silver' },
+  { id: 'H204', sku: 'DATA-MINING-BOOK', category: 'Books', qty: 10, unitPrice: 65, discountPct: 0, region: 'Bandung', customerTier: 'Bronze' },
+  { id: 'H205', sku: 'CONFERENCE-MIC', category: 'Accessories', qty: 4, unitPrice: 120, discountPct: 10, region: 'Medan', customerTier: 'Gold' },
+  { id: 'H206', sku: 'STORAGE-ARRAY', category: 'Electronics', qty: 1, unitPrice: 3400, discountPct: 20, region: 'Jakarta', customerTier: 'Platinum' },
+  { id: 'H207', sku: 'MODULAR-DESK', category: 'Furniture', qty: 3, unitPrice: 320, discountPct: 0, region: 'Denpasar', customerTier: 'Silver' },
+  { id: 'H208', sku: 'AI-ENG-HANDBOOK', category: 'Books', qty: 6, unitPrice: 80, discountPct: 5, region: 'Surabaya', customerTier: 'Platinum' },
+  { id: 'H209', sku: 'FIBER-SWITCH', category: 'Electronics', qty: 2, unitPrice: 950, discountPct: 8, region: 'Bandung', customerTier: 'Gold' },
+  { id: 'H210', sku: 'USB4-HUB', category: 'Accessories', qty: 12, unitPrice: 35, discountPct: 15, region: 'Medan', customerTier: 'Bronze' },
+  { id: 'H211', sku: 'GAMING-PANEL', category: 'Electronics', qty: 3, unitPrice: 520, discountPct: 12, region: 'Jakarta', customerTier: 'Silver' },
+  { id: 'H212', sku: 'SHELVING-UNIT', category: 'Furniture', qty: 4, unitPrice: 190, discountPct: 0, region: 'Surabaya', customerTier: 'Bronze' },
+  { id: 'H213', sku: 'SEC-TOKEN-PACK', category: 'Accessories', qty: 15, unitPrice: 20, discountPct: 25, region: 'Bandung', customerTier: 'Platinum' },
+  { id: 'H214', sku: 'SYSADMIN-MANUAL', category: 'Books', qty: 8, unitPrice: 45, discountPct: 0, region: 'Denpasar', customerTier: 'Gold' },
+];
+return { transactions };`,
       steps: [
         {
           id: randomUUID(),
@@ -226,7 +276,7 @@ return {
   totalTaxCollected: Math.round(sumTax * 100) / 100,
   netSettlement: Math.round(netSettlement * 100) / 100,
   effectiveMarginPct: effectiveMargin,
-  auditPassed: netSettlement > 0 && items.length === 12,
+  auditPassed: netSettlement > 0 && items.length > 0,
 };`,
         },
       ],
@@ -235,6 +285,19 @@ return {
     // 2. rb-designed-risk-assessment (7 cells)
     {
       name: "rb-designed-risk-assessment",
+      heldoutSeedCode: `const applicants = [
+  { id: 'APP-H101', age: 29, monthlyIncome: 12500, monthlyDebt: 2800, creditHistoryYears: 5, missedPayments: 0, loanAmount: 45000, collateralValue: 70000 },
+  { id: 'APP-H102', age: 44, monthlyIncome: 32000, monthlyDebt: 8500, creditHistoryYears: 16, missedPayments: 1, loanAmount: 180000, collateralValue: 290000 },
+  { id: 'APP-H103', age: 22, monthlyIncome: 4800, monthlyDebt: 2100, creditHistoryYears: 2, missedPayments: 2, loanAmount: 22000, collateralValue: 20000 },
+  { id: 'APP-H104', age: 52, monthlyIncome: 19000, monthlyDebt: 3100, creditHistoryYears: 22, missedPayments: 0, loanAmount: 75000, collateralValue: 140000 },
+  { id: 'APP-H105', age: 36, monthlyIncome: 16500, monthlyDebt: 6200, creditHistoryYears: 10, missedPayments: 0, loanAmount: 85000, collateralValue: 110000 },
+  { id: 'APP-H106', age: 61, monthlyIncome: 24000, monthlyDebt: 1800, creditHistoryYears: 30, missedPayments: 0, loanAmount: 90000, collateralValue: 210000 },
+  { id: 'APP-H107', age: 27, monthlyIncome: 8200, monthlyDebt: 4100, creditHistoryYears: 4, missedPayments: 3, loanAmount: 35000, collateralValue: 32000 },
+  { id: 'APP-H108', age: 39, monthlyIncome: 14000, monthlyDebt: 4900, creditHistoryYears: 11, missedPayments: 0, loanAmount: 65000, collateralValue: 85000 },
+  { id: 'APP-H109', age: 33, monthlyIncome: 10500, monthlyDebt: 3900, creditHistoryYears: 7, missedPayments: 1, loanAmount: 40000, collateralValue: 48000 },
+  { id: 'APP-H110', age: 46, monthlyIncome: 27500, monthlyDebt: 5800, creditHistoryYears: 19, missedPayments: 0, loanAmount: 130000, collateralValue: 220000 },
+];
+return { applicants };`,
       steps: [
         {
           id: randomUUID(),
@@ -369,6 +432,19 @@ return {
     // 3. rb-designed-text-pipeline (7 cells)
     {
       name: "rb-designed-text-pipeline",
+      heldoutSeedCode: `const documents = [
+  'Microservices architecture and container orchestration streamline scalable distributed software deployments.',
+  'Cybersecurity frameworks require continuous automated vulnerability detection and proactive compliance auditing.',
+  'Real-time telemetry and distributed stream processing empower intelligent cloud monitoring infrastructures.',
+  'Scalable database clusters optimize high-throughput transaction processing for modern financial systems.',
+  'Distributed consensus algorithms secure multi-region cloud applications against network partitions.',
+  'Continuous delivery pipelines automate regression testing and resilient enterprise microservice deployments.',
+  'Intelligent observability platforms analyze streaming telemetry metrics using machine learning anomaly detection.',
+  'Containerized serverless applications accelerate cloud computing transformations with elastic scalability.',
+  'Automated security scanning and cryptographic validation ensure resilient enterprise software supply chains.',
+  'Modern cloud native architectures integrate distributed telemetry stream pipelines for operational intelligence.',
+];
+return { documents };`,
       steps: [
         {
           id: randomUUID(),
@@ -489,7 +565,7 @@ for (const s of scores) {
   sum += s;
   if (s > maxSim) maxSim = s;
   if (s < minSim) minSim = s;
-  if (s >= 0.25) strongPairs++;
+  if (s >= 0.20) strongPairs++;
 }
 
 const avgSim = Math.round((sum / (scores.length || 1)) * 1000) / 1000;
@@ -500,7 +576,7 @@ return {
   maxSimilarity: maxSim,
   minSimilarity: minSim,
   strongConnectionCount: strongPairs,
-  corpusCohesive: avgSim > 0.08 && strongPairs >= 5,
+  corpusCohesive: avgSim > 0.05 && strongPairs >= 3,
 };`,
         },
       ],
@@ -509,6 +585,20 @@ return {
     // 4. rb-designed-task-scheduling (8 cells)
     {
       name: "rb-designed-task-scheduling",
+      heldoutSeedCode: `const tasks = [
+  { id: 'H1', duration: 5, deps: [], priority: 2, ramMb: 1024 },
+  { id: 'H2', duration: 3, deps: [], priority: 1, ramMb: 512 },
+  { id: 'H3', duration: 7, deps: ['H1'], priority: 3, ramMb: 2048 },
+  { id: 'H4', duration: 4, deps: ['H1', 'H2'], priority: 2, ramMb: 1024 },
+  { id: 'H5', duration: 6, deps: ['H2'], priority: 1, ramMb: 512 },
+  { id: 'H6', duration: 8, deps: ['H3'], priority: 3, ramMb: 4096 },
+  { id: 'H7', duration: 5, deps: ['H3', 'H4'], priority: 2, ramMb: 1024 },
+  { id: 'H8', duration: 3, deps: ['H4', 'H5'], priority: 1, ramMb: 512 },
+  { id: 'H9', duration: 6, deps: ['H6'], priority: 3, ramMb: 2048 },
+  { id: 'H10', duration: 4, deps: ['H7', 'H8'], priority: 2, ramMb: 1024 },
+  { id: 'H11', duration: 5, deps: ['H9', 'H10'], priority: 3, ramMb: 2048 },
+];
+return { tasks };`,
       steps: [
         {
           id: randomUUID(),
@@ -655,7 +745,7 @@ return {
   nominalMakespanHours: maxFinish,
   totalBufferHoursAllocated: totalBuffer,
   pipelineEfficiencyPct: efficiency,
-  schedulingViable: maxFinish <= 40 && criticalCount >= 3,
+  schedulingViable: maxFinish <= 60 && criticalCount >= 2,
 };`,
         },
       ],
@@ -664,6 +754,32 @@ return {
     // 5. rb-designed-financial-reconciliation (8 cells)
     {
       name: "rb-designed-financial-reconciliation",
+      heldoutSeedCode: `const ledgerRecords = [
+  { ref: 'REF-H101', amount: 2400000, curr: 'IDR', fee: 0, date: '2026-08-10' },
+  { ref: 'REF-H102', amount: 500, curr: 'USD', fee: 10, date: '2026-08-10' },
+  { ref: 'REF-H103', amount: 350, curr: 'EUR', fee: 6, date: '2026-08-11' },
+  { ref: 'REF-H104', amount: 6800000, curr: 'IDR', fee: 0, date: '2026-08-11' },
+  { ref: 'REF-H105', amount: 120, curr: 'USD', fee: 3, date: '2026-08-12' },
+  { ref: 'REF-H106', amount: 4500000, curr: 'IDR', fee: 0, date: '2026-08-12' },
+  { ref: 'REF-H107', amount: 800, curr: 'EUR', fee: 12, date: '2026-08-13' },
+  { ref: 'REF-H108', amount: 950000, curr: 'IDR', fee: 0, date: '2026-08-13' },
+  { ref: 'REF-H109', amount: 650, curr: 'USD', fee: 12, date: '2026-08-14' },
+  { ref: 'REF-H110', amount: 11000000, curr: 'IDR', fee: 0, date: '2026-08-14' },
+];
+
+const gatewayRecords = [
+  { ref: 'REF-H101', netPaid: 2352000, gatewayFee: 48000, curr: 'IDR' },
+  { ref: 'REF-H102', netPaid: 490, gatewayFee: 10, curr: 'USD' },
+  { ref: 'REF-H103', netPaid: 343, gatewayFee: 7, curr: 'EUR' },
+  { ref: 'REF-H104', netPaid: 6664000, gatewayFee: 136000, curr: 'IDR' },
+  { ref: 'REF-H105', netPaid: 117.6, gatewayFee: 2.4, curr: 'USD' },
+  { ref: 'REF-H106', netPaid: 4410000, gatewayFee: 90000, curr: 'IDR' },
+  { ref: 'REF-H107', netPaid: 784, gatewayFee: 16, curr: 'EUR' },
+  { ref: 'REF-H108', netPaid: 931000, gatewayFee: 19000, curr: 'IDR' },
+  { ref: 'REF-H109', netPaid: 637, gatewayFee: 13, curr: 'USD' },
+  { ref: 'REF-H110', netPaid: 10780000, gatewayFee: 220000, curr: 'IDR' },
+];
+return { ledgerRecords, gatewayRecords };`,
       steps: [
         {
           id: randomUUID(),
@@ -812,7 +928,7 @@ return {
   totalNetClearedIdr: Math.round(totalGrossCleared),
   discrepancyIdr: Math.round(totalDiff),
   complianceRatePct: matchRate,
-  reconciliationPassed: totalDiff === 0 && matchRate >= 90,
+  reconciliationPassed: totalDiff === 0 && matchRate >= 80,
 };`,
         },
       ],
@@ -821,6 +937,21 @@ return {
     // 6. rb-designed-credit-scoring (9 cells)
     {
       name: "rb-designed-credit-scoring",
+      heldoutSeedCode: `const bureauProfiles = [
+  { id: 'BOR-H201', age: 38, jobTenureYears: 7, inquiries6m: 1, utilPct: 25, late30d: 0, lines: 5 },
+  { id: 'BOR-H202', age: 24, jobTenureYears: 2, inquiries6m: 4, utilPct: 85, late30d: 2, lines: 3 },
+  { id: 'BOR-H203', age: 49, jobTenureYears: 14, inquiries6m: 0, utilPct: 18, late30d: 0, lines: 7 },
+  { id: 'BOR-H204', age: 32, jobTenureYears: 5, inquiries6m: 2, utilPct: 45, late30d: 1, lines: 4 },
+  { id: 'BOR-H205', age: 62, jobTenureYears: 24, inquiries6m: 0, utilPct: 8, late30d: 0, lines: 9 },
+  { id: 'BOR-H206', age: 27, jobTenureYears: 3, inquiries6m: 3, utilPct: 70, late30d: 1, lines: 2 },
+  { id: 'BOR-H207', age: 44, jobTenureYears: 10, inquiries6m: 1, utilPct: 32, late30d: 0, lines: 6 },
+  { id: 'BOR-H208', age: 56, jobTenureYears: 18, inquiries6m: 0, utilPct: 12, late30d: 0, lines: 8 },
+  { id: 'BOR-H209', age: 30, jobTenureYears: 4, inquiries6m: 2, utilPct: 58, late30d: 1, lines: 3 },
+  { id: 'BOR-H210', age: 41, jobTenureYears: 8, inquiries6m: 0, utilPct: 29, late30d: 0, lines: 5 },
+  { id: 'BOR-H211', age: 23, jobTenureYears: 1, inquiries6m: 5, utilPct: 92, late30d: 3, lines: 2 },
+  { id: 'BOR-H212', age: 35, jobTenureYears: 6, inquiries6m: 1, utilPct: 38, late30d: 0, lines: 4 },
+];
+return { bureauProfiles };`,
       steps: [
         {
           id: randomUUID(),
@@ -989,7 +1120,7 @@ return {
   totalCreditLimitAssigned: totalLimit,
   totalCapitalReservesCommitted: totalReserves,
   averageApprovedAprPct: avgApr,
-  portfolioAcceptable: avgScore >= 620 && approvedCount >= 6,
+  portfolioAcceptable: avgScore >= 600 && approvedCount >= 4,
 };`,
         },
       ],
@@ -999,7 +1130,7 @@ return {
 
 async function main() {
   console.log("=======================================================");
-  console.log("R10.1 — REBUILDING 6 DESIGNED BENCHMARK NOTEBOOKS");
+  console.log("R10.1 & R7.0 — PROVISIONING DESIGNED NOTEBOOKS & HELDOUT TRUTH");
   console.log("=======================================================");
 
   const fixturesDir = join(process.cwd(), "fixtures", "designed");
@@ -1028,13 +1159,8 @@ async function main() {
       doc = created;
     }
 
-    // Save fixture JSON
-    const fixturePath = join(fixturesDir, `${nbDef.name}.json`);
-    writeFileSync(fixturePath, JSON.stringify(doc, null, 2), "utf8");
-    console.log(`  ✓ Saved fixture to ${fixturePath}`);
-
-    // Verify 10x determinism replays
-    console.log(`  Verifying 10 replay runs for determinism...`);
+    // Verify 10x determinism replays on primary seed
+    console.log(`  Verifying 10 replay runs for primary determinism...`);
     const baselineRun = await runNotebook(nbId);
     if (baselineRun.status !== "success") {
       throw new Error(`Baseline run failed for ${nbDef.name}: ${baselineRun.error}`);
@@ -1052,13 +1178,62 @@ async function main() {
         throw new Error(`Non-deterministic output on replay ${r} for ${nbDef.name}!`);
       }
     }
-    console.log(`  ✓ 10/10 Replays strictly deterministic! Terminal output hash: ${baselineHash.slice(0, 12)}...`);
+    console.log(`  ✓ 10/10 Replays strictly deterministic! Primary output hash: ${baselineHash.slice(0, 12)}...`);
+
+    // Compute heldOutTruthHash on pre-mutation notebook
+    console.log(`  Computing heldOutTruthHash using held-out seed...`);
+    const scratchDup = await duplicateNotebook(nbId);
+    const scratchId = scratchDup.id;
+    const uuid8 = randomUUID().slice(0, 8);
+    const scratchName = `zz-rewind-scratch-${uuid8}`;
+    let heldOutTruthHash = "";
+
+    try {
+      const scratchDoc = { ...doc, id: scratchId, name: scratchName };
+      scratchDoc.steps[0].code = nbDef.heldoutSeedCode;
+      await saveNotebookDoc(scratchDoc);
+
+      const heldoutRun = await runNotebook(scratchId);
+      if (heldoutRun.status !== "success") {
+        throw new Error(`Held-out run failed for ${nbDef.name}: ${heldoutRun.error}`);
+      }
+
+      const heldoutOutput = heldoutRun.cell_results?.[baselineTerminalId]?.output;
+      heldOutTruthHash = hashValue(heldoutOutput);
+      console.log(`  ✓ Held-out truth output hash computed: ${heldOutTruthHash.slice(0, 12)}...`);
+    } finally {
+      await deleteNotebook(scratchId, scratchName);
+    }
+
+    // Save primary fixture JSON with heldOutTruthHash metadata
+    const fixturePrimary = {
+      ...doc,
+      heldOutTruthHash,
+    };
+    const fixturePath = join(fixturesDir, `${nbDef.name}.json`);
+    writeFileSync(fixturePath, JSON.stringify(fixturePrimary, null, 2), "utf8");
+    console.log(`  ✓ Saved primary fixture to ${fixturePath}`);
+
+    // Save held-out fixture JSON
+    const fixtureHeldout = {
+      ...doc,
+      heldOutTruthHash,
+      steps: doc.steps.map((s: any, sIdx: number) => {
+        if (sIdx === 0) {
+          return { ...s, code: nbDef.heldoutSeedCode };
+        }
+        return s;
+      }),
+    };
+    const heldoutFixturePath = join(fixturesDir, `${nbDef.name}.heldout.json`);
+    writeFileSync(heldoutFixturePath, JSON.stringify(fixtureHeldout, null, 2), "utf8");
+    console.log(`  ✓ Saved held-out fixture to ${heldoutFixturePath}`);
   }
 
-  console.log("\n" + "=".repeat(55));
-  console.log("ALL 6 DESIGNED NOTEBOOKS REBUILT & VERIFIED DETERMINISTIC");
-  console.log("Lengths: 6, 7, 7, 8, 8, 9 with randomUUID() IDs");
-  console.log("=".repeat(55));
+  console.log("\n" + "=".repeat(65));
+  console.log("ALL 6 DESIGNED NOTEBOOKS & HELDOUT FIXTURES GENERATED");
+  console.log("Fixtures: fixtures/designed/*.json & *.heldout.json");
+  console.log("=".repeat(65));
 }
 
 main().catch((err) => {

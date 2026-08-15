@@ -1,5 +1,5 @@
 /**
- * CLI Runner for Arms A/B/C (R6, R6.1, R5.1, R9, R10 & R10.1)
+ * CLI Runner for Arms A/B/C (R6, R6.1, R5.1, R9, R10, R10.1 & R7.0)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
  * Supports incidental corpus (results/mutations.jsonl -> results/arms.jsonl)
@@ -8,6 +8,12 @@
  * Supplies terminal cell symptom (final expected vs actual output) and all cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
  * Saves transcripts to results/transcripts/<arm>-<mutationId>.json.
+ *
+ * Evaluates real held-out luckyPass (R7.0):
+ * - Designed corpus: replaces first cell with heldoutSeed, runs scratch notebook, compares to heldOutTruthHash.
+ *   luckyPass = resolved && heldOutHash !== heldOutTruthHash.
+ * - Incidental corpus: luckyPass = null, reported as "n/a".
+ * - Previous heuristic renamed to offTargetFix = resolved && !editedCells.includes(mutation.cellId).
  *
  * Primary report axis: distBand (direct [0], short [1-3], long [4+])
  * Secondary report axes: hopBand (near, mid, far) and stratum (value-level, name-level).
@@ -34,6 +40,7 @@ import {
   type HopBand,
   type DistBand,
 } from "./mutate";
+import { hashValue } from "./ledger";
 import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -229,6 +236,8 @@ function saveTranscript(transcriptsDir: string, arm: string, mutation: Mutation,
     stopReason: armResult.stopReason,
     resolved: armResult.resolved,
     luckyPass: armResult.luckyPass,
+    offTargetFix: armResult.offTargetFix,
+    heldOutHash: armResult.heldOutHash,
     editedCells: armResult.editedCells,
     wallMs: armResult.wallMs,
     tokens: {
@@ -308,7 +317,13 @@ function printSummaryBlock(title: string, armRuns: ArmResult[], arms: string[]) 
     }
 
     const resolved = runs.filter((r) => r.resolved).length;
-    const lucky = runs.filter((r) => r.luckyPass).length;
+    const luckyChecked = runs.filter((r) => r.luckyPass !== null);
+    const luckyCount = runs.filter((r) => r.luckyPass === true).length;
+    const luckyStr =
+      luckyChecked.length === 0
+        ? "n/a"
+        : `${luckyCount} / ${resolved} (${resolved > 0 ? ((luckyCount / resolved) * 100).toFixed(1) : "0.0"}%)`;
+    const offTargetCount = runs.filter((r) => r.offTargetFix).length;
     const protoFails = runs.filter((r) => r.protocolFailure).length;
     const lengthFails = runs.filter((r) => r.lengthFailure).length;
     const stopReasonCounts = runs.reduce((acc: Record<string, number>, r) => {
@@ -323,7 +338,8 @@ function printSummaryBlock(title: string, armRuns: ArmResult[], arms: string[]) 
     console.log(`  Arm: ${arm.toUpperCase()}`);
     console.log(`    Total runs:        ${total}`);
     console.log(`    Resolved:          ${resolved} / ${total} (${((resolved / total) * 100).toFixed(1)}%)`);
-    console.log(`    Lucky passes:      ${lucky}`);
+    console.log(`    Lucky passes:      ${luckyStr}`);
+    console.log(`    Off-target fixes:  ${offTargetCount}`);
     console.log(`    Protocol failures: ${protoFails}`);
     console.log(`    Length failures:   ${lengthFails}`);
     console.log(`    Stop reasons:      ${JSON.stringify(stopReasonCounts)}`);
@@ -453,8 +469,8 @@ async function main() {
   console.log("=======================================================");
   console.log(
     isDesigned
-      ? "R10.1 — ARMS (A/B/C) EVALUATION ON DESIGNED CORPUS"
-      : "R9 — ARMS (A/B/C) EVALUATION BENCHMARK"
+      ? "R10.1 & R7.0 — ARMS (A/B/C) EVALUATION ON DESIGNED CORPUS"
+      : "R9 & R7.0 — ARMS (A/B/C) EVALUATION BENCHMARK"
   );
   console.log("=======================================================");
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
@@ -561,6 +577,43 @@ async function main() {
 
         const { messages, ...armResult } = armExecutionResult;
 
+        // 6. Held-out Lucky-Pass Check (R7.0)
+        let luckyPass: boolean | null = null;
+        let heldOutHash: string | undefined = undefined;
+
+        if (isDesigned && mutation.notebookName.startsWith("rb-designed-")) {
+          const heldoutFixturePath = join(process.cwd(), "fixtures", "designed", `${mutation.notebookName}.heldout.json`);
+          if (existsSync(heldoutFixturePath)) {
+            try {
+              const heldoutDoc = JSON.parse(readFileSync(heldoutFixturePath, "utf8"));
+              const heldoutSeedCode = heldoutDoc.steps?.[0]?.code;
+              const heldOutTruthHash = heldoutDoc.heldOutTruthHash;
+
+              if (heldoutSeedCode && heldOutTruthHash) {
+                // In the repaired scratchDoc, replace the first step's code with heldout seed
+                scratchDoc.steps[0].code = heldoutSeedCode;
+                await saveNotebookDoc(scratchDoc);
+
+                const heldoutRun = await runScratchNotebookFull(scratchId!);
+                const heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+
+                if (!heldoutRun.error && heldoutOutput !== undefined) {
+                  heldOutHash = hashValue(heldoutOutput);
+                  luckyPass = armResult.resolved && (heldOutHash !== heldOutTruthHash);
+                } else {
+                  heldOutHash = "ERROR";
+                  luckyPass = armResult.resolved && true;
+                }
+              }
+            } catch (heldoutErr) {
+              console.log(`  ⚠ Held-out check error: ${heldoutErr}`);
+            }
+          }
+        }
+
+        armResult.luckyPass = luckyPass;
+        armResult.heldOutHash = heldOutHash;
+
         results.push(armResult);
         appendArmResult(armsPath, armResult);
         saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
@@ -569,11 +622,13 @@ async function main() {
         completionTokensList.push(completionTokens);
 
         const resIcon = armResult.resolved ? "✓ RESOLVED" : "✗ UNRESOLVED";
-        const lucky = armResult.luckyPass ? " [LUCKY PASS]" : "";
+        const lucky = armResult.luckyPass === true ? " [LUCKY PASS (held-out fail)]" : "";
+        const offTarget = armResult.offTargetFix ? " [OFF-TARGET FIX]" : "";
         const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
         const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
+        const heldoutNote = heldOutHash ? ` | heldOutHash: ${heldOutHash.slice(0, 8)}...` : "";
         console.log(
-          `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens} | ${armResult.wallMs}ms`
+          `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${offTarget}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens}${heldoutNote} | ${armResult.wallMs}ms`
         );
       } catch (armErr) {
         console.log(`  -> Arm ${arm} failed with error: ${armErr}`);
@@ -589,7 +644,7 @@ async function main() {
   console.log("\n" + "=".repeat(65));
   console.log(
     isDesigned
-      ? "R10.1 BENCHMARK SUMMARY REPORT (Designed Heterogeneous Corpus)"
+      ? "R10.1 & R7.0 BENCHMARK SUMMARY REPORT (Designed Heterogeneous Corpus)"
       : "R9 BENCHMARK SUMMARY REPORT"
   );
   console.log("=".repeat(65));
