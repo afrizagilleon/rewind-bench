@@ -1,7 +1,8 @@
 /**
- * Arm C — Rewind (R6)
+ * Arm C — Rewind (R6 & R6.1)
  *
  * Interactive multi-turn debugging empowered with Materialized Scope Replay.
+ * Receives concrete symptom (expected vs actual outputs) and all cell sources upfront.
  * Reading a cell returns both cell source code and the exact recorded upstream scope
  * from the baseline run (scopeBefore).
  * Running a cell automatically injects the materialized scope if input is not provided.
@@ -13,7 +14,37 @@ import type { ArmContext, ArmResult } from "./types";
 import { hashValue } from "../ledger";
 import { scopeBefore } from "../msr";
 
-function formatCellOutline(steps: any[]): string {
+function formatSymptom(baselineRun: any, actualRun: any): string {
+  let expectedOutputs: any = baselineRun.outputs;
+  if (!expectedOutputs || Object.keys(expectedOutputs).length === 0) {
+    expectedOutputs = {};
+    for (const [cId, res] of Object.entries(baselineRun.cell_results || {})) {
+      if ((res as any).output !== undefined) expectedOutputs[cId] = (res as any).output;
+    }
+  }
+
+  let actualOutputs: any = actualRun.outputs;
+  if (!actualOutputs || Object.keys(actualOutputs).length === 0) {
+    actualOutputs = {};
+    for (const [cId, res] of Object.entries(actualRun.cell_results || {})) {
+      if ((res as any).output !== undefined) actualOutputs[cId] = (res as any).output;
+      else if ((res as any).error) actualOutputs[cId] = { error: (res as any).error };
+    }
+  }
+
+  let symptom = `Expected notebook outputs (from baseline run):\n\`\`\`json\n${JSON.stringify(expectedOutputs, null, 2)}\n\`\`\`\n\n`;
+  symptom += `Actual notebook run result (current faulty state):\nStatus: ${actualRun.status}\n`;
+  if (actualRun.error) {
+    symptom += `Run error: ${actualRun.error}\n`;
+  }
+  if (actualRun.errors && Array.isArray(actualRun.errors) && actualRun.errors.length > 0) {
+    symptom += `Errors: ${JSON.stringify(actualRun.errors, null, 2)}\n`;
+  }
+  symptom += `Actual outputs:\n\`\`\`json\n${JSON.stringify(actualOutputs, null, 2)}\n\`\`\``;
+  return symptom;
+}
+
+function formatAllCells(steps: any[]): string {
   const parts: string[] = [];
   function walk(s?: any[]) {
     for (const step of s ?? []) {
@@ -23,12 +54,12 @@ function formatCellOutline(steps: any[]): string {
       }
       const code = step.code ?? "";
       if (code.trim().length > 0) {
-        parts.push(`- Cell ID: ${step.id}`);
+        parts.push(`--- Cell ID: ${step.id} ---\n\`\`\`javascript\n${code}\n\`\`\``);
       }
     }
   }
   walk(steps);
-  return parts.join("\n");
+  return parts.join("\n\n");
 }
 
 function updateCellSourceInDoc(steps: any[], targetCellId: string, newSource: string): boolean {
@@ -90,12 +121,13 @@ function formatScopeWithTruncation(
   };
 }
 
-export async function runRewindArm(ctx: ArmContext): Promise<ArmResult> {
-  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, saveScratchDoc, runScratchCell, model, maxTokens } = ctx;
+export async function runRewindArm(ctx: ArmContext): Promise<ArmResult & { messages: any[] }> {
+  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, actualRun, saveScratchDoc, runScratchCell, model, maxTokens, maxTurns } = ctx;
 
   const systemPrompt = `You are an automated code repair agent for zaatool reactive notebooks with Materialized Scope Replay.
 A notebook previously produced correct outputs but now fails or produces incorrect results.
-When you read a cell using notebook_read, the upstream state (scopeBefore) from the last good run is provided.
+You are given the symptom (expected vs actual outputs) and the entire notebook source upfront.
+When you read a cell using notebook_read, the recorded upstream state (scopeBefore) from the last good run is provided.
 When you execute a cell using notebook_run_cell without input, that exact recorded upstream scope is automatically supplied.
 
 Available actions (respond with exactly one JSON block):
@@ -117,9 +149,12 @@ Available actions (respond with exactly one JSON block):
 \`\`\``;
 
   const initialUserMessage = `Notebook: "${mutation.notebookName}" (${mutation.notebookId})
-The notebook has stopped producing expected results.
-Here are the cells in this notebook:
-${formatCellOutline(scratchNotebookDoc.steps)}
+
+=== SYMPTOM ===
+${formatSymptom(baselineRun, actualRun)}
+
+=== NOTEBOOK SOURCE CELLS ===
+${formatAllCells(scratchNotebookDoc.steps)}
 
 Investigate the cells and their upstream state, locate the bug, repair it with notebook_edit_cell, and finish.`;
 
@@ -162,7 +197,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     temperature: 0,
     seed: 42,
     reasoningEffort: "low",
-    maxTurns: 8,
+    maxTurns: maxTurns || 15,
   });
 
   // Evaluate resolution against baseline scope
@@ -191,5 +226,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     protocolFailure: summary.protocolFailure,
     lengthFailure: summary.lengthFailure,
     scopeTruncated: anyScopeTruncated || summary.scopeTruncated,
+    stopReason: summary.stopReason,
+    messages: summary.messages,
   };
 }

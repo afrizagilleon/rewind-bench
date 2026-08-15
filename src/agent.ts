@@ -1,13 +1,14 @@
 /**
- * Core Agent Loop (R6)
+ * Core Agent Loop (R6 & R6.1)
  *
  * Single shared agent loop (~150 lines) used by Monolithic, Stepwise, and Rewind arms.
  * Enforces structured JSON protocol over Featherless OpenAI-compatible chat completions.
- * Handles turns, corrections (max 2), token accounting (prompt, reasoning, answer),
+ * Handles turns (up to maxTurns=15), corrections (max 2), token accounting,
  * and length failure detection without silent retries.
  */
 
 import { requireEnv } from "./client";
+import type { StopReason } from "./arms/types";
 
 export interface AgentAction {
   action: "notebook_read" | "notebook_run_cell" | "notebook_edit_cell" | "finish";
@@ -34,6 +35,11 @@ export interface AgentConfig {
   maxTurns?: number;
 }
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
 export interface AgentRunSummary {
   editedCells: string[];
   turns: number;
@@ -47,12 +53,9 @@ export interface AgentRunSummary {
   protocolFailure: boolean;
   lengthFailure: boolean;
   scopeTruncated: boolean;
+  stopReason: StopReason;
   finishReason?: string;
-}
-
-interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  messages: ChatMessage[];
 }
 
 /**
@@ -107,11 +110,11 @@ export async function runAgentLoop(
   const temperature = config.temperature ?? 0;
   const seed = config.seed ?? 42;
   const reasoningEffort = config.reasoningEffort || "low";
-  const maxTurns = config.maxTurns || 8;
+  const maxTurns = config.maxTurns || 15;
 
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: initialUserMessage },
+    { role: "user", content: `Turn 1 of ${maxTurns}.\n\n${initialUserMessage}` },
   ];
 
   const editedCells: string[] = [];
@@ -123,6 +126,7 @@ export async function runAgentLoop(
   let lengthFailure = false;
   let scopeTruncated = false;
   let finishReason = "";
+  let stopReason: StopReason = "max-turns";
   let protocolErrorCount = 0;
   let turns = 0;
 
@@ -150,11 +154,13 @@ export async function runAgentLoop(
       });
     } catch (err: unknown) {
       protocolFailure = true;
+      stopReason = "protocol";
       break;
     }
 
     if (!res.ok) {
       protocolFailure = true;
+      stopReason = "protocol";
       break;
     }
 
@@ -183,7 +189,6 @@ export async function runAgentLoop(
 
     let rTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
     if (rTokens === undefined) {
-      // Estimate reasoning tokens from reasoning text length
       rTokens = reasoning.length > 0 ? Math.min(cTokens, Math.max(1, Math.round(reasoning.length / 3.8))) : 0;
     }
     const aTokens = Math.max(0, cTokens - rTokens);
@@ -195,6 +200,7 @@ export async function runAgentLoop(
 
     if (fReason === "length") {
       lengthFailure = true;
+      stopReason = "length";
     }
 
     messages.push({ role: "assistant", content });
@@ -205,12 +211,12 @@ export async function runAgentLoop(
       protocolErrorCount++;
       if (protocolErrorCount > 2) {
         protocolFailure = true;
+        stopReason = "protocol";
         break;
       }
       messages.push({
         role: "user",
-        content:
-          "Invalid format. You must respond with EXACTLY ONE fenced JSON code block:\n```json\n{\"action\": \"...\"}\n```",
+        content: `Turn ${turn + 1} of ${maxTurns}.\nInvalid format. You must respond with EXACTLY ONE fenced JSON code block:\n\`\`\`json\n{"action": "..."}\n\`\`\``,
       });
       continue;
     }
@@ -218,18 +224,21 @@ export async function runAgentLoop(
     // Process action
     if (action.action === "finish") {
       finishReason = String(action.reason || "completed");
+      stopReason = "finished";
       break;
     }
+
+    const nextTurnHeader = turn < maxTurns ? `Turn ${turn + 1} of ${maxTurns}.\n\n` : "";
 
     if (action.action === "notebook_read") {
       const cellId = String(action.cell || "");
       if (!cellId) {
-        messages.push({ role: "user", content: "Error: missing 'cell' parameter in notebook_read" });
+        messages.push({ role: "user", content: `${nextTurnHeader}Error: missing 'cell' parameter in notebook_read` });
         continue;
       }
       const readResult = await tools.readCell(cellId);
       if (readResult.scopeTruncated) scopeTruncated = true;
-      messages.push({ role: "user", content: readResult.content });
+      messages.push({ role: "user", content: `${nextTurnHeader}${readResult.content}` });
       continue;
     }
 
@@ -237,20 +246,20 @@ export async function runAgentLoop(
       if (tools.rejectRun) {
         messages.push({
           role: "user",
-          content: "Error: notebook_run_cell is not available in monolithic mode. You must edit the code directly and finish.",
+          content: `${nextTurnHeader}Error: notebook_run_cell is not available in monolithic mode. You must edit the code directly and finish.`,
         });
         continue;
       }
       const cellId = String(action.cell || "");
       if (!cellId) {
-        messages.push({ role: "user", content: "Error: missing 'cell' parameter in notebook_run_cell" });
+        messages.push({ role: "user", content: `${nextTurnHeader}Error: missing 'cell' parameter in notebook_run_cell` });
         continue;
       }
       const runRes = await tools.runCell(cellId, action.input);
       const resText = runRes.error
         ? `Cell execution failed:\n${runRes.error}`
         : `Cell output:\n${JSON.stringify(runRes.output, null, 2)}`;
-      messages.push({ role: "user", content: resText });
+      messages.push({ role: "user", content: `${nextTurnHeader}${resText}` });
       continue;
     }
 
@@ -258,7 +267,7 @@ export async function runAgentLoop(
       const cellId = String(action.cell || "");
       const code = String(action.code || "");
       if (!cellId || code === undefined) {
-        messages.push({ role: "user", content: "Error: missing 'cell' or 'code' in notebook_edit_cell" });
+        messages.push({ role: "user", content: `${nextTurnHeader}Error: missing 'cell' or 'code' in notebook_edit_cell` });
         continue;
       }
       const editRes = await tools.editCell(cellId, code);
@@ -266,9 +275,9 @@ export async function runAgentLoop(
         if (!editedCells.includes(cellId)) {
           editedCells.push(cellId);
         }
-        messages.push({ role: "user", content: `Cell ${cellId} updated successfully.` });
+        messages.push({ role: "user", content: `${nextTurnHeader}Cell ${cellId} updated successfully.` });
       } else {
-        messages.push({ role: "user", content: `Failed to update cell ${cellId}: ${editRes.error}` });
+        messages.push({ role: "user", content: `${nextTurnHeader}Failed to update cell ${cellId}: ${editRes.error}` });
       }
       continue;
     }
@@ -277,11 +286,12 @@ export async function runAgentLoop(
     protocolErrorCount++;
     if (protocolErrorCount > 2) {
       protocolFailure = true;
+      stopReason = "protocol";
       break;
     }
     messages.push({
       role: "user",
-      content: `Unknown action "${action.action}". Allowed actions: notebook_read, notebook_run_cell, notebook_edit_cell, finish.`,
+      content: `${nextTurnHeader}Unknown action "${action.action}". Allowed actions: notebook_read, notebook_run_cell, notebook_edit_cell, finish.`,
     });
   }
 
@@ -295,11 +305,13 @@ export async function runAgentLoop(
     reasoningTokens,
     answerTokens,
     totalTokens,
-    resolved: false, // will be evaluated against ground-truth baselineHash
+    resolved: false,
     luckyPass: false,
     protocolFailure,
     lengthFailure,
     scopeTruncated,
+    stopReason,
     finishReason,
+    messages,
   };
 }

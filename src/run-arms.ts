@@ -1,9 +1,10 @@
 /**
- * CLI Runner for Arms A/B/C (R6)
+ * CLI Runner for Arms A/B/C (R6 & R6.1)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
+ * Supplies concrete symptoms (expected vs actual outputs) and full cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
- * Appends results to results/arms.jsonl per record.
+ * Saves transcripts to results/transcripts/<arm>-<mutationId>.json and appends records to results/arms.jsonl.
  *
  * Usage:
  *   npm run arms -- --smoke                  # 3 mutations × 3 arms
@@ -18,7 +19,7 @@ import { runStepwiseArm } from "./arms/stepwise";
 import { runRewindArm } from "./arms/rewind";
 import type { ArmResult, ArmContext } from "./arms/types";
 import type { Mutation } from "./mutate";
-import { readFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -105,6 +106,19 @@ async function pollRunFinished(
   throw new Error(`Timeout polling run ${runId}`);
 }
 
+async function runScratchNotebookFull(scratchId: string): Promise<any> {
+  const res = await apiRequest(`/api/notebooks/${encodeURIComponent(scratchId)}/run`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { status: "failed", error: `HTTP ${res.status}: ${text}` };
+  }
+  const { runId } = (await res.json()) as { runId: string };
+  return await pollRunFinished(scratchId, runId);
+}
+
 async function runCellInScratch(
   scratchId: string,
   cellId: string,
@@ -154,6 +168,33 @@ function updateCellSourceInDoc(steps: any[], targetCellId: string, newSource: st
 function appendArmResult(path: string, result: ArmResult): void {
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(result) + "\n", "utf8");
+}
+
+function saveTranscript(transcriptsDir: string, arm: string, mutation: Mutation, armResult: ArmResult, messages: any[]): void {
+  mkdirSync(transcriptsDir, { recursive: true });
+  const safeId = mutation.id.replace(/[:\/\\?*|<>"]/g, "_");
+  const filePath = join(transcriptsDir, `${arm}-${safeId}.json`);
+  const transcriptData = {
+    arm: armResult.arm,
+    mutationId: armResult.mutationId,
+    notebookId: mutation.notebookId,
+    notebookName: mutation.notebookName,
+    model: armResult.model,
+    turns: armResult.turns,
+    stopReason: armResult.stopReason,
+    resolved: armResult.resolved,
+    luckyPass: armResult.luckyPass,
+    editedCells: armResult.editedCells,
+    wallMs: armResult.wallMs,
+    tokens: {
+      promptTokens: armResult.promptTokens,
+      reasoningTokens: armResult.reasoningTokens,
+      answerTokens: armResult.answerTokens,
+      totalTokens: armResult.totalTokens,
+    },
+    messages,
+  };
+  writeFileSync(filePath, JSON.stringify(transcriptData, null, 2), "utf8");
 }
 
 function loadMutations(mutationsPath: string): Mutation[] {
@@ -219,8 +260,10 @@ async function main() {
   const resultsDir = process.env.RESULTS_DIR || "./results";
   const mutationsPath = join(resultsDir, "mutations.jsonl");
   const armsPath = join(resultsDir, "arms.jsonl");
+  const transcriptsDir = join(resultsDir, "transcripts");
 
   mkdirSync(resultsDir, { recursive: true });
+  mkdirSync(transcriptsDir, { recursive: true });
 
   const mutations = loadMutations(mutationsPath);
   if (mutations.length === 0) {
@@ -235,16 +278,19 @@ async function main() {
 
   const model = process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731";
   const maxTokens = parseInt(process.env.ARM_MAX_TOKENS || "8000", 10);
+  const maxTurns = 15;
 
   console.log("=======================================================");
-  console.log("R6 — ARMS (A/B/C) EVALUATION BENCHMARK");
+  console.log("R6.1 — ARMS (A/B/C) EVALUATION BENCHMARK");
   console.log("=======================================================");
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN (3 mutations × 3 arms)" : "FULL BENCHMARK"}`);
   console.log(`Target mutants:  ${targetMutations.length}`);
   console.log(`Arms to run:     ${armsToRun.join(", ")}`);
   console.log(`Model:           ${model}`);
   console.log(`Max tokens:      ${maxTokens}`);
-  console.log(`Arms output:     ${armsPath}\n`);
+  console.log(`Max turns:       ${maxTurns}`);
+  console.log(`Arms output:     ${armsPath}`);
+  console.log(`Transcripts dir: ${transcriptsDir}\n`);
 
   const results: ArmResult[] = [];
   const completionTokensList: number[] = [];
@@ -288,16 +334,20 @@ async function main() {
         scratchName = `zz-rewind-arm-${uuid8}`;
         scratchDoc.name = scratchName;
 
-        // 2. Inject mutated code into scratch notebook
+        // 2. Inject mutated code into scratch notebook & save
         updateCellSourceInDoc(scratchDoc.steps, mutation.cellId, mutation.mutatedSource);
         await saveNotebookDoc(scratchDoc);
 
-        // 3. Build arm context
+        // 3. Execute mutated notebook ONCE to obtain concrete symptom
+        const actualRun = await runScratchNotebookFull(scratchId);
+
+        // 4. Build arm context
         const ctx: ArmContext = {
           mutation,
           scratchNotebookDoc: scratchDoc,
           originalDoc,
           baselineRun,
+          actualRun,
           saveScratchDoc: async (doc: any) => {
             await saveNotebookDoc(doc);
           },
@@ -306,20 +356,24 @@ async function main() {
           },
           model,
           maxTokens,
+          maxTurns,
         };
 
-        // 4. Run arm
-        let armResult: ArmResult;
+        // 5. Run arm
+        let armExecutionResult: ArmResult & { messages: any[] };
         if (arm === "monolithic") {
-          armResult = await runMonolithicArm(ctx);
+          armExecutionResult = await runMonolithicArm(ctx);
         } else if (arm === "stepwise") {
-          armResult = await runStepwiseArm(ctx);
+          armExecutionResult = await runStepwiseArm(ctx);
         } else {
-          armResult = await runRewindArm(ctx);
+          armExecutionResult = await runRewindArm(ctx);
         }
+
+        const { messages, ...armResult } = armExecutionResult;
 
         results.push(armResult);
         appendArmResult(armsPath, armResult);
+        saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
 
         const completionTokens = armResult.reasoningTokens + armResult.answerTokens;
         completionTokensList.push(completionTokens);
@@ -329,12 +383,12 @@ async function main() {
         const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
         const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
         console.log(
-          `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${protoFail}${lenFail} | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens} | ${armResult.wallMs}ms`
+          `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens} | ${armResult.wallMs}ms`
         );
       } catch (armErr) {
         console.log(`  -> Arm ${arm} failed with error: ${armErr}`);
       } finally {
-        // 5. Clean up scratch notebook
+        // 6. Clean up scratch notebook
         if (scratchId) {
           await deleteNotebook(scratchId, scratchName);
         }
@@ -344,7 +398,7 @@ async function main() {
 
   // Summary Metrics
   console.log("\n" + "=".repeat(65));
-  console.log("R6 BENCHMARK SUMMARY");
+  console.log("R6.1 BENCHMARK SUMMARY");
   console.log("=".repeat(65));
 
   for (const arm of armsToRun) {
@@ -356,6 +410,10 @@ async function main() {
     const lucky = armRuns.filter((r) => r.luckyPass).length;
     const protoFails = armRuns.filter((r) => r.protocolFailure).length;
     const lengthFails = armRuns.filter((r) => r.lengthFailure).length;
+    const stopReasonCounts = armRuns.reduce((acc: Record<string, number>, r) => {
+      acc[r.stopReason] = (acc[r.stopReason] || 0) + 1;
+      return acc;
+    }, {});
     const avgTurns = (armRuns.reduce((sum, r) => sum + r.turns, 0) / total).toFixed(1);
     const avgPrompt = Math.round(armRuns.reduce((sum, r) => sum + r.promptTokens, 0) / total);
     const avgReasoning = Math.round(armRuns.reduce((sum, r) => sum + r.reasoningTokens, 0) / total);
@@ -367,6 +425,7 @@ async function main() {
     console.log(`  Lucky passes:      ${lucky}`);
     console.log(`  Protocol failures: ${protoFails}`);
     console.log(`  Length failures:   ${lengthFails}`);
+    console.log(`  Stop reasons:      ${JSON.stringify(stopReasonCounts)}`);
     console.log(`  Avg turns:         ${avgTurns}`);
     console.log(`  Avg tokens:        prompt=${avgPrompt}, reasoning=${avgReasoning}, ans=${avgAnswer}`);
   }

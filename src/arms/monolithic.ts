@@ -1,8 +1,8 @@
 /**
- * Arm A — Monolithic (R6)
+ * Arm A — Monolithic (R6 & R6.1)
  *
  * One-shot whole-notebook repair without execution tools.
- * All cell sources are provided in the initial prompt.
+ * Receives concrete symptom (expected vs actual outputs) and all cell sources.
  * Rejects notebook_run_cell actions.
  */
 
@@ -10,6 +10,36 @@ import { runAgentLoop, type AgentTools } from "../agent";
 import type { ArmContext, ArmResult } from "./types";
 import { hashValue } from "../ledger";
 import { scopeBefore } from "../msr";
+
+function formatSymptom(baselineRun: any, actualRun: any): string {
+  let expectedOutputs: any = baselineRun.outputs;
+  if (!expectedOutputs || Object.keys(expectedOutputs).length === 0) {
+    expectedOutputs = {};
+    for (const [cId, res] of Object.entries(baselineRun.cell_results || {})) {
+      if ((res as any).output !== undefined) expectedOutputs[cId] = (res as any).output;
+    }
+  }
+
+  let actualOutputs: any = actualRun.outputs;
+  if (!actualOutputs || Object.keys(actualOutputs).length === 0) {
+    actualOutputs = {};
+    for (const [cId, res] of Object.entries(actualRun.cell_results || {})) {
+      if ((res as any).output !== undefined) actualOutputs[cId] = (res as any).output;
+      else if ((res as any).error) actualOutputs[cId] = { error: (res as any).error };
+    }
+  }
+
+  let symptom = `Expected notebook outputs (from baseline run):\n\`\`\`json\n${JSON.stringify(expectedOutputs, null, 2)}\n\`\`\`\n\n`;
+  symptom += `Actual notebook run result (current faulty state):\nStatus: ${actualRun.status}\n`;
+  if (actualRun.error) {
+    symptom += `Run error: ${actualRun.error}\n`;
+  }
+  if (actualRun.errors && Array.isArray(actualRun.errors) && actualRun.errors.length > 0) {
+    symptom += `Errors: ${JSON.stringify(actualRun.errors, null, 2)}\n`;
+  }
+  symptom += `Actual outputs:\n\`\`\`json\n${JSON.stringify(actualOutputs, null, 2)}\n\`\`\``;
+  return symptom;
+}
 
 function formatAllCells(steps: any[]): string {
   const parts: string[] = [];
@@ -65,12 +95,12 @@ function findCellCode(steps: any[], targetCellId: string): string | null {
   return null;
 }
 
-export async function runMonolithicArm(ctx: ArmContext): Promise<ArmResult> {
-  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, saveScratchDoc, runScratchCell, model, maxTokens } = ctx;
+export async function runMonolithicArm(ctx: ArmContext): Promise<ArmResult & { messages: any[] }> {
+  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, actualRun, saveScratchDoc, runScratchCell, model, maxTokens, maxTurns } = ctx;
 
   const systemPrompt = `You are an automated code repair agent for zaatool reactive notebooks.
 A notebook previously produced correct outputs but now fails or produces incorrect results.
-You are given the entire notebook source.
+You are given the symptom (expected vs actual outputs) and the entire notebook source.
 You must find the faulty cell, repair it using the notebook_edit_cell action, and call finish.
 Note: notebook_run_cell is DISABLED in monolithic mode.
 
@@ -84,9 +114,14 @@ or
 \`\`\``;
 
   const initialUserMessage = `Notebook: "${mutation.notebookName}" (${mutation.notebookId})
-The notebook has stopped producing expected outputs. Review all cells below, locate the bug, fix it with notebook_edit_cell, and finish.
 
-${formatAllCells(scratchNotebookDoc.steps)}`;
+=== SYMPTOM ===
+${formatSymptom(baselineRun, actualRun)}
+
+=== NOTEBOOK SOURCE CELLS ===
+${formatAllCells(scratchNotebookDoc.steps)}
+
+Locate the bug causing the discrepancy, fix it using notebook_edit_cell, and finish.`;
 
   const tools: AgentTools = {
     rejectRun: true,
@@ -112,7 +147,7 @@ ${formatAllCells(scratchNotebookDoc.steps)}`;
     temperature: 0,
     seed: 42,
     reasoningEffort: "low",
-    maxTurns: 8,
+    maxTurns: maxTurns || 15,
   });
 
   // Evaluate resolution against baseline scope
@@ -141,5 +176,7 @@ ${formatAllCells(scratchNotebookDoc.steps)}`;
     protocolFailure: summary.protocolFailure,
     lengthFailure: summary.lengthFailure,
     scopeTruncated: summary.scopeTruncated,
+    stopReason: summary.stopReason,
+    messages: summary.messages,
   };
 }
