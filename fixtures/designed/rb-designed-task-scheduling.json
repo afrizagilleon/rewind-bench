@@ -1,0 +1,46 @@
+{
+  "name": "rb-designed-task-scheduling",
+  "steps": [
+    {
+      "id": "task-raw-manifest",
+      "kind": "cell",
+      "code": "const tasks = [\n  { id: 'T1', duration: 4, deps: [], priority: 1, ramMb: 512 },\n  { id: 'T2', duration: 6, deps: ['T1'], priority: 2, ramMb: 1024 },\n  { id: 'T3', duration: 3, deps: ['T1'], priority: 1, ramMb: 256 },\n  { id: 'T4', duration: 8, deps: ['T2'], priority: 3, ramMb: 2048 },\n  { id: 'T5', duration: 5, deps: ['T2', 'T3'], priority: 2, ramMb: 512 },\n  { id: 'T6', duration: 2, deps: ['T3'], priority: 1, ramMb: 256 },\n  { id: 'T7', duration: 7, deps: ['T4'], priority: 3, ramMb: 1024 },\n  { id: 'T8', duration: 4, deps: ['T5', 'T6'], priority: 2, ramMb: 512 },\n  { id: 'T9', duration: 5, deps: ['T7', 'T8'], priority: 3, ramMb: 1024 },\n];\nreturn { tasks };"
+    },
+    {
+      "id": "task-topo-sort",
+      "kind": "cell",
+      "code": "const tasks = inputs.tasks;\nconst sorted = [...tasks].sort((a, b) => a.deps.length - b.deps.length || a.id.localeCompare(b.id));\nreturn { sortedTasks: sorted };"
+    },
+    {
+      "id": "task-forward-pass",
+      "kind": "cell",
+      "code": "const tasks = inputs.sortedTasks;\nconst finishTimes = {};\nconst forward = tasks.map((t) => {\n  let estStart = 0;\n  for (const d of t.deps) {\n    if (finishTimes[d] && finishTimes[d] > estStart) {\n      estStart = finishTimes[d];\n    }\n  }\n  const estFinish = estStart + t.duration;\n  finishTimes[t.id] = estFinish;\n  return {\n    ...t,\n    estStart,\n    estFinish,\n  };\n});\nreturn { forwardSchedule: forward };"
+    },
+    {
+      "id": "task-backward-pass",
+      "kind": "cell",
+      "code": "const forward = inputs.forwardSchedule;\nconst maxSpan = Math.max(...forward.map((t) => t.estFinish));\nconst latestStartMap = {};\n\nfor (let i = forward.length - 1; i >= 0; i--) {\n  const t = forward[i];\n  const dependents = forward.filter((f) => f.deps.includes(t.id));\n  let lstFinish = maxSpan;\n  if (dependents.length > 0) {\n    lstFinish = Math.min(...dependents.map((d) => latestStartMap[d.id] ?? maxSpan));\n  }\n  const lstStart = lstFinish - t.duration;\n  latestStartMap[t.id] = lstStart;\n}\n\nconst bounded = forward.map((t) => ({\n  ...t,\n  lstStart: latestStartMap[t.id],\n  slack: latestStartMap[t.id] - t.estStart,\n}));\nreturn { boundedSchedule: bounded };"
+    },
+    {
+      "id": "task-critical-path",
+      "kind": "cell",
+      "code": "const bounded = inputs.boundedSchedule;\nconst critical = bounded.map((t) => ({\n  id: t.id,\n  duration: t.duration,\n  priority: t.priority,\n  ramMb: t.ramMb,\n  isCritical: t.slack === 0,\n  estStart: t.estStart,\n  estFinish: t.estFinish,\n}));\nreturn { criticalSchedule: critical };"
+    },
+    {
+      "id": "task-resource-allocation",
+      "kind": "cell",
+      "code": "const critical = inputs.criticalSchedule;\nconst allocated = critical.map((t) => {\n  let workerSlot = 1;\n  if (t.isCritical && t.priority >= 3) {\n    workerSlot = 3;\n  } else if (t.ramMb > 1024) {\n    workerSlot = 2;\n  }\n  return {\n    ...t,\n    workerSlot,\n  };\n});\nreturn { allocatedSchedule: allocated };"
+    },
+    {
+      "id": "task-buffer-injection",
+      "kind": "cell",
+      "code": "const allocated = inputs.allocatedSchedule;\nconst buffered = allocated.map((t) => {\n  let bufferHours = 0;\n  if (t.isCritical) {\n    bufferHours = Math.ceil(t.duration * 0.20);\n  }\n  return {\n    ...t,\n    bufferedDuration: t.duration + bufferHours,\n    bufferHours,\n  };\n});\nreturn { bufferedSchedule: buffered };"
+    },
+    {
+      "id": "task-makespan-reduction",
+      "kind": "cell",
+      "code": "const tasks = inputs.bufferedSchedule;\nlet totalWorkHours = 0;\nlet totalBuffer = 0;\nlet criticalCount = 0;\nlet maxFinish = 0;\n\nfor (const t of tasks) {\n  totalWorkHours += t.duration;\n  totalBuffer += t.bufferHours;\n  if (t.isCritical) criticalCount++;\n  const adjustedFinish = t.estFinish + t.bufferHours;\n  if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\n}\n\nconst efficiency = Math.round((totalWorkHours / (maxFinish || 1)) * 1000) / 10;\n\nreturn {\n  taskCount: tasks.length,\n  criticalTaskCount: criticalCount,\n  nominalMakespanHours: maxFinish,\n  totalBufferHoursAllocated: totalBuffer,\n  pipelineEfficiencyPct: efficiency,\n  schedulingViable: maxFinish <= 40 && criticalCount >= 3,\n};"
+    }
+  ],
+  "id": "5177d40e-0eda-4f4d-81c2-48b260c5feda"
+}

@@ -142,6 +142,21 @@ export function cellReads(code: string): string[] {
         }
       }
     },
+    VariableDeclarator(node: any) {
+      if (node.init?.type === "Identifier" && node.init.name === "inputs") {
+        if (node.id?.type === "ObjectPattern") {
+          for (const prop of node.id.properties || []) {
+            if (prop.type === "Property" && !prop.computed) {
+              if (prop.key?.type === "Identifier") {
+                names.add(prop.key.name);
+              } else if (prop.key?.type === "Literal" && typeof prop.key.value === "string") {
+                names.add(prop.key.value);
+              }
+            }
+          }
+        }
+      }
+    },
   });
 
   return Array.from(names);

@@ -1,13 +1,17 @@
 /**
- * CLI Runner for Mutation Engine (R9 Stratified & Hop-Calibrated Ground Truth)
+ * CLI Runner for Mutation Engine (R9 & R10 Ground Truth)
  *
  * Generates and validates synthetic bugs against deterministic cells with upstream dependencies.
- * A cell is ELIGIBLE ONLY if at least one key it reads is produced by an earlier cell (readsFromUpstream = true).
- * Enforces R9 composition: >=8 near (1-2), >=8 mid (3-6), >=8 far (7+), max 5 per notebook (relaxed for 20-cell pipeline), >=8 distinct notebooks.
+ * When run with --designed:
+ * - Operates ONLY on rb-designed-* benchmark notebooks
+ * - Outputs to results/mutations-designed.jsonl (separate file)
+ * - Enforces max 5 mutations per notebook
+ * - Enforces >= 5 distinct notebooks represented per hopBand (near, mid, far)
+ * - If constraint cannot be met: reports conflict and stops
  *
  * Usage:
+ *   npm run mutate -- --designed
  *   npm run mutate -- --fresh
- *   npm run mutate -- --limit=50
  *   npm run mutate -- --cleanup
  */
 
@@ -19,7 +23,6 @@ import {
   loadDeterministicCells,
   computeHopDistances,
   stratumForKind,
-  hopBandForDistance,
   type Mutation,
   type MutationKind,
   type Stratum,
@@ -103,8 +106,15 @@ async function pollRunFinished(
       `/api/notebooks/${encodeURIComponent(notebookId)}/runs/${encodeURIComponent(runId)}`
     );
     if (res.ok) {
-      const run = (await res.json()) as { status: string };
+      const run = (await res.json()) as { status: string; cell_results?: Record<string, any> };
       if (run.status !== "running") {
+        if (!run.cell_results || Object.keys(run.cell_results).length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const retryRes = await apiRequest(
+            `/api/notebooks/${encodeURIComponent(notebookId)}/runs/${encodeURIComponent(runId)}`
+          );
+          if (retryRes.ok) return await retryRes.json();
+        }
         return run;
       }
     }
@@ -198,10 +208,11 @@ async function main() {
     return;
   }
 
+  const isDesigned = args.includes("--designed");
   let limit = 50;
-  let maxPerNotebook = 3;
+  let maxPerNotebook = isDesigned ? 5 : 3;
   let allowedKinds: Set<MutationKind> | null = null;
-  const isFresh = args.includes("--fresh") || !args.some((a) => a.startsWith("--limit="));
+  const isFresh = args.includes("--fresh") || isDesigned;
 
   for (const arg of args) {
     if (arg.startsWith("--limit=")) {
@@ -221,49 +232,56 @@ async function main() {
 
   const resultsDir = process.env.RESULTS_DIR || "./results";
   const determinismPath = join(resultsDir, "determinism.jsonl");
-  const mutationsPath = join(resultsDir, "mutations.jsonl");
+  const mutationsPath = isDesigned
+    ? join(resultsDir, "mutations-designed.jsonl")
+    : join(resultsDir, "mutations.jsonl");
   const backupR51Path = join(resultsDir, "mutations-r51.jsonl");
 
   mkdirSync(resultsDir, { recursive: true });
 
   if (isFresh) {
-    if (existsSync(mutationsPath) && !existsSync(backupR51Path)) {
+    if (!isDesigned && existsSync(mutationsPath) && !existsSync(backupR51Path)) {
       copyFileSync(mutationsPath, backupR51Path);
       console.log(`Preserved previous corpus as ${backupR51Path}`);
     }
     try {
       rmSync(mutationsPath, { force: true });
-      console.log("Reset previous mutations.jsonl for fresh R9 mutation run.");
+      console.log(`Reset previous ${mutationsPath} for fresh mutation run.`);
     } catch {
       // ignore
     }
   }
 
   console.log("=======================================================");
-  console.log("R9 — MUTATION ENGINE (Hop-Calibrated Ground Truth)");
+  console.log(
+    isDesigned
+      ? "R10 — MUTATION ENGINE (Designed Heterogeneous Corpus)"
+      : "R9 — MUTATION ENGINE (Hop-Calibrated Ground Truth)"
+  );
   console.log("=======================================================");
+  console.log(`Mode:                  ${isDesigned ? "DESIGNED NOTEBOOKS (rb-designed-*)" : "INCIDENTAL CORPUS"}`);
   console.log(`Target verified limit: ${limit}`);
-  console.log(`Targets:               >=8 near (1-2), >=8 mid (3-6), >=8 far (7+)`);
-  console.log(`Max per notebook:      ${maxPerNotebook} (relaxed for 20-cell pipeline)`);
+  console.log(`Max per notebook:      ${maxPerNotebook}`);
   console.log(`Eligibility rule:      readsFromUpstream === true (AST verified)`);
   if (allowedKinds) {
     console.log(`Allowed kinds:         ${Array.from(allowedKinds).join(", ")}`);
   }
   console.log(`Mutations output:      ${mutationsPath}\n`);
 
-  // 1. Load verified deterministic cells from H4 census
-  const deterministicCells = loadDeterministicCells(determinismPath);
-  console.log(`Loaded ${deterministicCells.size} deterministic target cell(s) from H4 census.\n`);
+  const allNotebooks = await listNotebooks();
+  const notebooks = isDesigned
+    ? allNotebooks.filter((nb) => nb.name.startsWith("rb-designed-"))
+    : allNotebooks.filter(
+        (nb) =>
+          !nb.name.startsWith("zz-rewind-scratch-") &&
+          !nb.name.endsWith("-copy") &&
+          !nb.name.startsWith("rb-designed-")
+      );
 
-  if (deterministicCells.size === 0) {
-    console.error("No deterministic cells found! Run determinism census first.");
+  if (isDesigned && notebooks.length === 0) {
+    console.error("No rb-designed-* notebooks found! Run 'npx tsx scripts/create-designed-notebooks.ts' first.");
     process.exit(1);
   }
-
-  const allNotebooks = await listNotebooks();
-  const notebooks = allNotebooks.filter(
-    (nb) => !nb.name.startsWith("zz-rewind-scratch-") && !nb.name.endsWith("-copy")
-  );
 
   let totalCandidatesGenerated = 0;
   let totalValidatedMutations = 0;
@@ -287,10 +305,16 @@ async function main() {
   };
 
   const validatedByNotebook: Record<string, number> = {};
+  const notebooksPerBand: Record<HopBand, Set<string>> = {
+    near: new Set<string>(),
+    mid: new Set<string>(),
+    far: new Set<string>(),
+  };
+
+  // Load deterministic cells if not designed
+  const deterministicCells = isDesigned ? new Set<string>() : loadDeterministicCells(determinismPath);
 
   for (let idx = 0; idx < notebooks.length; idx++) {
-    if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
-
     const nb = notebooks[idx];
     let originalDoc: any;
     try {
@@ -302,11 +326,12 @@ async function main() {
     const hopMap = computeHopDistances(originalDoc.steps);
     const execCells = getExecutableCells(originalDoc.steps);
 
-    // R9 Filter: ONLY cells that are deterministic AND read from upstream (hopDistance >= 1)
+    // Filter eligible cells: must read from upstream
     const eligibleCells = execCells.filter((c) => {
-      const isDet = deterministicCells.has(`${nb.id}:${c.id}`);
       const hopInfo = hopMap.get(c.id);
-      return isDet && hopInfo && hopInfo.readsFromUpstream && hopInfo.hopDistance >= 1;
+      if (!hopInfo || !hopInfo.readsFromUpstream || hopInfo.hopDistance < 1) return false;
+      if (isDesigned) return true; // Designed notebooks were pre-verified 10x deterministic
+      return deterministicCells.has(`${nb.id}:${c.id}`);
     });
 
     if (eligibleCells.length === 0) continue;
@@ -318,12 +343,25 @@ async function main() {
     let scratchId: string | null = null;
     let scratchName = "";
 
-    const isDeepPipeline = nb.name === "zz-uji-20-cell";
+    const isDeepPipeline = !isDesigned && nb.name === "zz-uji-20-cell";
     const nbCap = isDeepPipeline ? 22 : maxPerNotebook;
-    const maxPerCell = isDeepPipeline ? 2 : 2;
+    const maxPerCell = 1; // 1 mutation per cell ensures spread across near/mid/far
+
+    let orderedCells = eligibleCells;
+    if (isDesigned) {
+      const nearCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "near");
+      const midCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "mid");
+      const farCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "far");
+      orderedCells = [
+        ...farCells.slice(0, 1),
+        ...nearCells.slice(0, 2),
+        ...midCells.slice(0, 2),
+        ...farCells.slice(1),
+        ...midCells.slice(2),
+      ];
+    }
 
     try {
-      // Run baseline run to get ground-truth outputs and scopeBefore
       let baselineRun: any;
       try {
         baselineRun = await runNotebook(nb.id);
@@ -336,8 +374,7 @@ async function main() {
         continue;
       }
 
-      for (const cell of eligibleCells) {
-        if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
+      for (const cell of orderedCells) {
         if (nbValidatedCount >= nbCap) break;
 
         const hopInfo = hopMap.get(cell.id)!;
@@ -349,9 +386,7 @@ async function main() {
         const scope = scopeBefore(originalDoc, baselineRun, cell.id);
         const baselineHash = hashValue(baselineResult.output);
 
-        // Generate Layer-1 syntax valid candidates
         const rawCandidates = mutationsFor(nb.id, nb.name, cell.id, cell.code);
-        // Prioritize value-level candidates
         const sortedCandidates = rawCandidates.sort((a, b) => {
           if (a.kind === "key-rename" && b.kind !== "key-rename") return 1;
           if (a.kind !== "key-rename" && b.kind === "key-rename") return -1;
@@ -368,18 +403,9 @@ async function main() {
           if (cellValidatedCount >= maxPerCell) break;
           const stratum = stratumForKind(candidate.kind);
 
-          // Control group cap: maximum 15 name-level mutations in total
-          if (stratum === "name-level" && totalNameLevel >= 15) {
-            continue;
-          }
-
           kindStats[candidate.kind].generated++;
           totalCandidatesGenerated++;
 
-          if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
-          if (nbValidatedCount >= nbCap) break;
-
-          // Lazy scratch creation: duplicate notebook once per source notebook
           if (!scratchDoc) {
             try {
               const dup = await duplicateNotebook(nb.id);
@@ -394,7 +420,6 @@ async function main() {
             }
           }
 
-          // Layer 2: Behavioral validation via scratch execution
           try {
             updateCellSourceInDoc(scratchDoc.steps, cell.id, candidate.mutatedSource);
             await saveNotebookDoc(scratchDoc);
@@ -441,6 +466,7 @@ async function main() {
               else totalFar++;
 
               validatedByNotebook[nb.name] = (validatedByNotebook[nb.name] || 0) + 1;
+              notebooksPerBand[hopInfo.hopBand].add(nb.name);
 
               const errNote = mutantErrored ? " [crashed]" : "";
               console.log(
@@ -473,15 +499,19 @@ async function main() {
   const distinctNotebooksCount = Object.keys(validatedByNotebook).length;
 
   console.log("\n" + "=".repeat(60));
-  console.log("MUTATION ENGINE SUMMARY (R9 Hop-Calibrated Ground Truth)");
+  console.log(
+    isDesigned
+      ? "MUTATION ENGINE SUMMARY (R10 Designed Corpus)"
+      : "MUTATION ENGINE SUMMARY (R9 Incidental Corpus)"
+  );
   console.log("=".repeat(60));
   console.log(`Candidates generated (Layer 1 syntax): ${totalCandidatesGenerated}`);
   console.log(`Validated mutations (Layer 2 behavior): ${totalValidatedMutations}`);
-  console.log(`Distinct notebooks:                    ${distinctNotebooksCount} (target >= 8)`);
-  console.log(`\nHop Band Distribution:`);
-  console.log(`  - near (hop 1-2):                    ${totalNear} (target >= 8)`);
-  console.log(`  - mid  (hop 3-6):                    ${totalMid} (target >= 8)`);
-  console.log(`  - far  (hop 7+):                     ${totalFar} (target >= 8)`);
+  console.log(`Distinct notebooks:                    ${distinctNotebooksCount}`);
+  console.log(`\nHop Band Distribution & Notebook Representation:`);
+  console.log(`  - near (hop 1-2): ${String(totalNear).padStart(2)} mutations across ${notebooksPerBand.near.size} notebook(s) (target >= 5 notebooks)`);
+  console.log(`  - mid  (hop 3-6): ${String(totalMid).padStart(2)} mutations across ${notebooksPerBand.mid.size} notebook(s) (target >= 5 notebooks)`);
+  console.log(`  - far  (hop 7+):  ${String(totalFar).padStart(2)} mutations across ${notebooksPerBand.far.size} notebook(s) (target >= 5 notebooks)`);
   console.log(`\nStratum Distribution:`);
   console.log(`  - Value-level stratum:               ${totalValueLevel}`);
   console.log(`  - Name-level stratum (control):      ${totalNameLevel}`);
@@ -499,6 +529,29 @@ async function main() {
     console.log(`  - ${nbName}: ${count} mutation(s)`);
   }
   console.log("=".repeat(60));
+
+  // R10 Check: minimal 5 notebooks represented per band
+  if (isDesigned) {
+    const conflicts: string[] = [];
+    if (notebooksPerBand.near.size < 5) {
+      conflicts.push(`Near band (hop 1-2) only has ${notebooksPerBand.near.size} notebook(s) (required >= 5)`);
+    }
+    if (notebooksPerBand.mid.size < 5) {
+      conflicts.push(`Mid band (hop 3-6) only has ${notebooksPerBand.mid.size} notebook(s) (required >= 5)`);
+    }
+    if (notebooksPerBand.far.size < 5) {
+      conflicts.push(`Far band (hop 7+) only has ${notebooksPerBand.far.size} notebook(s) (required >= 5)`);
+    }
+
+    if (conflicts.length > 0) {
+      console.error("\n[R10 CONSTRAINT CONFLICT DETECTED]");
+      for (const c of conflicts) console.error(`  ✗ ${c}`);
+      console.error("Stopping execution as required by R10 contract.");
+      process.exit(1);
+    } else {
+      console.log("\n✓ R10 Constraint satisfied: >= 5 distinct notebooks represented in each hop band (near, mid, far).");
+    }
+  }
 }
 
 main().catch((err) => {

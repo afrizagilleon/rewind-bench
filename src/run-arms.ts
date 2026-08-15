@@ -1,14 +1,16 @@
 /**
- * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1 & R9)
+ * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1 & R9 & R10)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
+ * Supports incidental corpus (results/mutations.jsonl) and designed corpus (--designed, results/mutations-designed.jsonl).
  * Supplies terminal cell symptom (final expected vs actual output) and all cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
  * Saves transcripts to results/transcripts/<arm>-<mutationId>.json and appends records to results/arms.jsonl.
  * Reports summary stratified across hopBands (near, mid, far) and strata (overall, name-level, value-level).
  *
  * Usage:
- *   npm run arms -- --smoke --hop=far             # 3 far-hop (>=7) mutations from 3 distinct notebooks
+ *   npm run arms -- --smoke --designed --hop=far   # 3 far-hop mutations from 3 distinct designed notebooks
+ *   npm run arms -- --smoke --hop=far             # 3 far-hop mutations from incidental corpus
  *   npm run arms -- --smoke                       # 3 mutations × 3 arms
  *   npm run arms -- --limit=50                    # full benchmark run
  *   npm run arms -- --cleanup                     # remove any orphan zz-rewind-arm-*
@@ -99,6 +101,13 @@ async function pollRunFinished(
     if (res.ok) {
       const run = (await res.json()) as { status: string; cell_results?: Record<string, any>; error?: string };
       if (run.status !== "running") {
+        if (!run.cell_results || Object.keys(run.cell_results).length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const retryRes = await apiRequest(
+            `/api/notebooks/${encodeURIComponent(notebookId)}/runs/${encodeURIComponent(runId)}`
+          );
+          if (retryRes.ok) return await retryRes.json();
+        }
         return run;
       }
     }
@@ -312,6 +321,7 @@ async function main() {
   }
 
   const isSmoke = args.includes("--smoke");
+  const isDesigned = args.includes("--designed");
   let limit = isSmoke ? 3 : 50;
   let targetArm: "monolithic" | "stepwise" | "rewind" | null = null;
   let targetStratum: Stratum | null = null;
@@ -333,7 +343,9 @@ async function main() {
   }
 
   const resultsDir = process.env.RESULTS_DIR || "./results";
-  const mutationsPath = join(resultsDir, "mutations.jsonl");
+  const mutationsPath = isDesigned
+    ? join(resultsDir, "mutations-designed.jsonl")
+    : join(resultsDir, "mutations.jsonl");
   const armsPath = join(resultsDir, "arms.jsonl");
   const transcriptsDir = join(resultsDir, "transcripts");
 
@@ -342,55 +354,46 @@ async function main() {
 
   const mutations = loadMutations(mutationsPath);
   if (mutations.length === 0) {
-    console.error(`No mutations found in ${mutationsPath}! Run "npm run mutate" first.`);
+    console.error(`No mutations found in ${mutationsPath}! Run "npm run mutate ${isDesigned ? "-- --designed" : ""}" first.`);
     process.exit(1);
   }
 
   let selectedMutations: Mutation[] = [];
 
-  if (isSmoke && targetHop === "far") {
-    // Pick 3 far-hop (hop >= 7) mutations from 3 distinct notebooks
-    const farMutations = mutations.filter((m) => m.hopBand === "far" || (m.hopDistance && m.hopDistance >= 7));
+  if (isSmoke) {
+    // Filter candidates matching specified target criteria
+    let candidates = mutations;
+    if (targetHop) {
+      candidates = candidates.filter((m) => m.hopBand === targetHop || (targetHop === "far" && m.hopDistance && m.hopDistance >= 7));
+    }
+    if (targetStratum) {
+      candidates = candidates.filter((m) => m.stratum === targetStratum);
+    }
+
     const seenNotebooks = new Set<string>();
-    for (const m of farMutations) {
-      if (!seenNotebooks.has(m.notebookId)) {
+    const seenCells = new Set<string>();
+
+    for (const m of candidates) {
+      if (!seenNotebooks.has(m.notebookId) && !seenCells.has(m.cellId)) {
         seenNotebooks.add(m.notebookId);
+        seenCells.add(m.cellId);
         selectedMutations.push(m);
         if (selectedMutations.length >= 3) break;
       }
     }
+
+    // Strict R10 requirement: must have 3 distinct notebooks, fail if insufficient
     if (selectedMutations.length < 3) {
-      for (const m of farMutations) {
-        if (!selectedMutations.includes(m)) {
-          selectedMutations.push(m);
-          if (selectedMutations.length >= 3) break;
-        }
-      }
+      const distinctAvailable = new Set(candidates.map((c) => c.notebookId)).size;
+      throw new Error(
+        `Smoke run sampling failure: required 3 distinct notebooks for criteria (hop=${targetHop || "any"}, stratum=${targetStratum || "any"}), but only ${distinctAvailable} distinct notebook(s) are available in ${mutationsPath}.`
+      );
     }
-  } else if (isSmoke && targetStratum === "value-level") {
-    const valueMutations = mutations.filter((m) => m.stratum === "value-level" || m.kind !== "key-rename");
-    const seenNotebooks = new Set<string>();
-    for (const m of valueMutations) {
-      if (!seenNotebooks.has(m.notebookId)) {
-        seenNotebooks.add(m.notebookId);
-        selectedMutations.push(m);
-        if (selectedMutations.length >= 3) break;
-      }
-    }
-    if (selectedMutations.length < 3) {
-      for (const m of valueMutations) {
-        if (!selectedMutations.includes(m)) {
-          selectedMutations.push(m);
-          if (selectedMutations.length >= 3) break;
-        }
-      }
-    }
-  } else if (targetHop) {
-    selectedMutations = mutations.filter((m) => m.hopBand === targetHop).slice(0, limit);
-  } else if (targetStratum) {
-    selectedMutations = mutations.filter((m) => m.stratum === targetStratum).slice(0, limit);
   } else {
-    selectedMutations = mutations.slice(0, limit);
+    let filtered = mutations;
+    if (targetHop) filtered = filtered.filter((m) => m.hopBand === targetHop);
+    if (targetStratum) filtered = filtered.filter((m) => m.stratum === targetStratum);
+    selectedMutations = filtered.slice(0, limit);
   }
 
   const armsToRun: Array<"monolithic" | "stepwise" | "rewind"> = targetArm
@@ -402,9 +405,14 @@ async function main() {
   const maxTurns = 15;
 
   console.log("=======================================================");
-  console.log("R9 — ARMS (A/B/C) EVALUATION BENCHMARK");
+  console.log(
+    isDesigned
+      ? "R10 — ARMS (A/B/C) EVALUATION ON DESIGNED CORPUS"
+      : "R9 — ARMS (A/B/C) EVALUATION BENCHMARK"
+  );
   console.log("=======================================================");
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
+  console.log(`Corpus:          ${isDesigned ? "DESIGNED (results/mutations-designed.jsonl)" : "INCIDENTAL (results/mutations.jsonl)"}`);
   console.log(`Target mutants:  ${selectedMutations.length}`);
   if (targetHop) {
     console.log(`Target hop band: ${targetHop}`);
@@ -528,7 +536,11 @@ async function main() {
 
   // Summary Metrics
   console.log("\n" + "=".repeat(65));
-  console.log("R9 BENCHMARK SUMMARY REPORT");
+  console.log(
+    isDesigned
+      ? "R10 BENCHMARK SUMMARY REPORT (Designed Heterogeneous Corpus)"
+      : "R9 BENCHMARK SUMMARY REPORT"
+  );
   console.log("=".repeat(65));
 
   printSummaryBlock("OVERALL RESULTS", results, armsToRun);
