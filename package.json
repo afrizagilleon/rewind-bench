@@ -9,8 +9,9 @@
   "scripts": {
     "auth": "node --env-file-if-exists=.env scripts/auth.mjs",
     "mutate": "tsx --env-file-if-exists=.env src/run-mutate.ts",
+    "arms": "tsx --env-file-if-exists=.env src/run-arms.ts",
     "test": "node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run",
-    "test:unit": "vitest run test/client.unit.test.ts test/ledger.test.ts test/msr.test.ts test/determinism.test.ts test/mutate.test.ts",
+    "test:unit": "vitest run test/client.unit.test.ts test/ledger.test.ts test/msr.test.ts test/determinism.test.ts test/mutate.test.ts test/agent.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
