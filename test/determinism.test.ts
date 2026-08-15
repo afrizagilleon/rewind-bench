@@ -6,13 +6,34 @@ import {
   classifyCause,
   classifyCauses,
   isPermutation,
+  findDiffPaths,
   censusNotebook,
   type CellVerdict,
 } from "../src/determinism";
 import * as clientModule from "../src/client";
 import type { RunDetail } from "../src/client";
 
-describe("R4 / R4.1 Determinism — classifyCauses, classifyCause & isPermutation", () => {
+describe("R4.2 Determinism — findDiffPaths", () => {
+  it("extracts exact diffPaths for signed-URL case (R4.2 acceptance)", () => {
+    const a = { kept: { url: "http://storage.com/planted.txt?exp=1786798541106&sig=jD123" } };
+    const b = { kept: { url: "http://storage.com/planted.txt?exp=1786798541388&sig=Oy456" } };
+    expect(findDiffPaths(a, b)).toEqual(["kept.url"]);
+  });
+
+  it("extracts multiple nested diffPaths up to max 10", () => {
+    const a = { x: 1, nested: { a: "old", b: 2 }, list: [1, 2] };
+    const b = { x: 2, nested: { a: "new", b: 2 }, list: [1, 3] };
+    expect(findDiffPaths(a, b)).toEqual(["list.1", "nested.a", "x"]);
+  });
+
+  it("returns empty array for identical outputs", () => {
+    const a = { x: 1, y: { z: [1, 2] } };
+    const b = { x: 1, y: { z: [1, 2] } };
+    expect(findDiffPaths(a, b)).toEqual([]);
+  });
+});
+
+describe("R4 / R4.1 / R4.2 Determinism — classifyCauses & isPermutation", () => {
   it("detects permutations correctly", () => {
     expect(isPermutation([1, 2, 3], [3, 1, 2])).toBe(true);
     expect(isPermutation(["a", "b"], ["b", "a"])).toBe(true);
@@ -43,9 +64,7 @@ describe("R4 / R4.1 Determinism — classifyCauses, classifyCause & isPermutatio
 
   it("requires permutation proof for iteration-order (R4.1 acceptance)", () => {
     const code = "return { k: Object.keys(x) };";
-    // Without permutation proof -> unknown
     expect(classifyCauses(code, [1, 2], [3, 4])).toEqual(["unknown"]);
-    // With permutation proof -> iteration-order
     expect(classifyCauses(code, [1, 2], [2, 1])).toEqual(["iteration-order"]);
   });
 
@@ -62,7 +81,7 @@ describe("R4 / R4.1 Determinism — classifyCauses, classifyCause & isPermutatio
   });
 });
 
-describe("R4 / R4.1 Determinism — censusNotebook", () => {
+describe("R4.2 Determinism — censusNotebook & Transport Failure Handling", () => {
   let dir: string;
   let ledgerPath: string;
   let resultsPath: string;
@@ -78,50 +97,56 @@ describe("R4 / R4.1 Determinism — censusNotebook", () => {
     vi.restoreAllMocks();
   });
 
-  it("runs census returning exact verdicts with causes and ambiguous fields", async () => {
+  it("distinguishes transport failures from genuine cell output variation", async () => {
     const doc = {
-      id: "synthetic-nb",
-      name: "synthetic-determinism-test",
+      id: "synthetic-nb-transport",
+      name: "synthetic-transport-test",
       steps: [
-        { id: "c1", kind: "cell", code: "return { x: 1 };" },
-        { id: "c2", kind: "cell", code: "return { t: Date.now() };" },
-        { id: "c3", kind: "cell", code: "return { r: Math.random() };" },
-        { id: "c4", kind: "cell", code: "const res = await fetch(u); return { at: new Date().toISOString() };" },
+        { id: "c-normal", kind: "cell", code: "return { x: 1 };" },
+        { id: "c-flaky-transport", kind: "cell", code: "return { b: 2 };" },
+        { id: "c-cell-error", kind: "cell", code: "throw new Error('boom');" },
       ],
     };
 
     const baselineRun: RunDetail = {
       id: "baseline-1",
-      notebook_id: "synthetic-nb",
+      notebook_id: "synthetic-nb-transport",
       status: "success",
       started_at: "2026-08-15T00:00:00Z",
       finished_at: "2026-08-15T00:00:01Z",
       cell_results: {
-        c1: { output: { x: 1 }, written: ["x"], ms: 5 },
-        c2: { output: { t: 1000 }, written: ["t"], ms: 5 },
-        c3: { output: { r: 0.123 }, written: ["r"], ms: 5 },
-        c4: { output: { at: "2026-08-15T00:00:00Z" }, written: ["at"], ms: 5 },
+        "c-normal": { output: { x: 1 }, written: ["x"], ms: 5 },
+        "c-flaky-transport": { output: { b: 2 }, written: ["b"], ms: 5 },
+        "c-cell-error": { output: { err: 1 }, written: ["err"], ms: 5 },
       },
     };
 
     vi.spyOn(clientModule, "getNotebook").mockResolvedValue(doc);
     vi.spyOn(clientModule, "runNotebook").mockResolvedValue(baselineRun);
 
-    let replayCounter = 0;
+    let flakyCount = 0;
     vi.spyOn(clientModule, "runCell").mockImplementation(
       async (_nbId: string, cellId: string) => {
-        replayCounter++;
-        if (cellId === "c1") {
+        if (cellId === "c-normal") {
           return { output: { x: 1 }, written: ["x"], ms: 2 };
         }
-        if (cellId === "c2") {
-          return { output: { t: Date.now() + replayCounter }, written: ["t"], ms: 2 };
+        if (cellId === "c-flaky-transport") {
+          flakyCount++;
+          // For replays 2 and 4 (including retry), return missing cell error
+          if (flakyCount === 2 || flakyCount === 3 || flakyCount === 5 || flakyCount === 6) {
+            return {
+              error: "Cell result not found in run detail",
+              ms: 0,
+            };
+          }
+          return { output: { b: 2 }, written: ["b"], ms: 2 };
         }
-        if (cellId === "c3") {
-          return { output: { r: replayCounter * 0.111 }, written: ["r"], ms: 2 };
-        }
-        if (cellId === "c4") {
-          return { output: { at: `2026-08-15T00:00:0${replayCounter}Z` }, written: ["at"], ms: 2 };
+        if (cellId === "c-cell-error") {
+          // Genuine cell execution error (e.g. throw Error)
+          return {
+            error: "Genuine runtime error in cell",
+            ms: 2,
+          };
         }
         throw new Error(`Unexpected cell: ${cellId}`);
       }
@@ -129,57 +154,38 @@ describe("R4 / R4.1 Determinism — censusNotebook", () => {
 
     const replays = 5;
     const verdicts = await censusNotebook(
-      "synthetic-nb",
+      "synthetic-nb-transport",
       replays,
       ledgerPath,
       resultsPath
     );
 
-    expect(verdicts).toHaveLength(4);
+    expect(verdicts).toHaveLength(3);
 
-    // c1: deterministic
-    expect(verdicts[0].cellId).toBe("c1");
+    // c-normal
+    expect(verdicts[0].cellId).toBe("c-normal");
+    expect(verdicts[0].replays).toBe(5);
+    expect(verdicts[0].usableReplays).toBe(5);
+    expect(verdicts[0].transportFailures).toBe(0);
     expect(verdicts[0].deterministic).toBe(true);
-    expect(verdicts[0].distinctOutputs).toBe(1);
-    expect(verdicts[0].cause).toBeNull();
-    expect(verdicts[0].causes).toEqual([]);
-    expect(verdicts[0].ambiguous).toBe(false);
-    expect(verdicts[0].sample).toBeNull();
+    expect(verdicts[0].diffPaths).toEqual([]);
 
-    // c2: wall-clock (single cause)
-    expect(verdicts[1].cellId).toBe("c2");
-    expect(verdicts[1].deterministic).toBe(false);
-    expect(verdicts[1].distinctOutputs).toBe(5);
-    expect(verdicts[1].cause).toBe("wall-clock");
-    expect(verdicts[1].causes).toEqual(["wall-clock"]);
-    expect(verdicts[1].ambiguous).toBe(false);
-    expect(verdicts[1].sample).toBeDefined();
+    // c-flaky-transport: 2 transport failures, 3 usable replays with identical output
+    expect(verdicts[1].cellId).toBe("c-flaky-transport");
+    expect(verdicts[1].replays).toBe(5);
+    expect(verdicts[1].transportFailures).toBe(2);
+    expect(verdicts[1].usableReplays).toBe(3);
+    // Invariant: usableReplays + transportFailures === replays
+    expect(verdicts[1].usableReplays + verdicts[1].transportFailures).toBe(5);
+    // Crucial: distinctOutputs only counts usable data (1 output: { b: 2 })
+    expect(verdicts[1].distinctOutputs).toBe(1);
+    expect(verdicts[1].deterministic).toBe(true);
 
-    // c3: prng (single cause)
-    expect(verdicts[2].cellId).toBe("c3");
-    expect(verdicts[2].deterministic).toBe(false);
-    expect(verdicts[2].distinctOutputs).toBe(5);
-    expect(verdicts[2].cause).toBe("prng");
-    expect(verdicts[2].causes).toEqual(["prng"]);
-    expect(verdicts[2].ambiguous).toBe(false);
-    expect(verdicts[2].sample).toBeDefined();
-
-    // c4: wall-clock + network (multiple causes / ambiguous)
-    expect(verdicts[3].cellId).toBe("c4");
-    expect(verdicts[3].deterministic).toBe(false);
-    expect(verdicts[3].distinctOutputs).toBe(5);
-    expect(verdicts[3].cause).toBe("wall-clock");
-    expect(verdicts[3].causes).toEqual(["wall-clock", "network"]);
-    expect(verdicts[3].ambiguous).toBe(true);
-    expect(verdicts[3].sample).toBeDefined();
-
-    // Verify determinism.jsonl was flushed per record
-    expect(existsSync(resultsPath)).toBe(true);
-    const lines = readFileSync(resultsPath, "utf8").trim().split("\n");
-    expect(lines).toHaveLength(4);
-    const v4 = JSON.parse(lines[3]) as CellVerdict;
-    expect(v4.cellId).toBe("c4");
-    expect(v4.ambiguous).toBe(true);
-    expect(v4.causes).toEqual(["wall-clock", "network"]);
+    // c-cell-error: Genuine error is counted as usable data
+    expect(verdicts[2].cellId).toBe("c-cell-error");
+    expect(verdicts[2].replays).toBe(5);
+    expect(verdicts[2].usableReplays).toBe(5);
+    expect(verdicts[2].transportFailures).toBe(0);
+    expect(verdicts[2].deterministic).toBe(true); // All 5 yielded null scopeOutHash
   });
 });

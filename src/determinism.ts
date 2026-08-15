@@ -1,9 +1,9 @@
 /**
- * Determinism Census (R4 / R4.1 / H4)
+ * Determinism Census (R4 / R4.1 / R4.2 / H4)
  *
  * Measures cell output reproducibility under identical materialized scopes
- * across multiple replays and classifies causes of non-determinism, including
- * reporting all overlapping/ambiguous causes per cell.
+ * across multiple replays, classifies causes of non-determinism, distinguishes
+ * transport failures from genuine cell output variation, and computes diffPaths.
  */
 
 import { mkdir, appendFile } from "node:fs/promises";
@@ -25,9 +25,11 @@ export interface CellVerdict {
   cellId: string;
   sourceHash: string;
   scopeInHash: string;
-  replays: number;
+  replays: number; // requested replays
+  usableReplays: number; // replays that yielded data (success or genuine cell error)
+  transportFailures: number; // discarded, reported, not counted in distinctOutputs
   distinctOutputs: number;
-  deterministic: boolean; // distinctOutputs === 1
+  deterministic: boolean; // distinctOutputs === 1 on usableReplays
 
   /** Dominant / first matching cause — kept for backward compatibility and compact tables. */
   cause: DeterminismCause | null;
@@ -39,6 +41,9 @@ export interface CellVerdict {
   ambiguous: boolean;
 
   sample: { first: unknown; differing: unknown } | null;
+
+  /** JSON paths that differ between two samples, e.g. ["kept.url"]. Max 10. Empty array if deterministic. */
+  diffPaths: string[];
 }
 
 interface RawStep {
@@ -103,6 +108,78 @@ export function isPermutation(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Recursively compares two outputs and returns the JSON property paths that differ (max 10 paths).
+ */
+export function findDiffPaths(
+  a: unknown,
+  b: unknown,
+  prefix = "",
+  maxPaths = 10
+): string[] {
+  const diffs: string[] = [];
+
+  function compare(valA: unknown, valB: unknown, currentPath: string) {
+    if (diffs.length >= maxPaths) return;
+
+    if (canonicalize(valA) === canonicalize(valB)) {
+      return;
+    }
+
+    const typeA = typeof valA;
+    const typeB = typeof valB;
+
+    if (typeA !== typeB || valA === null || valB === null) {
+      diffs.push(currentPath);
+      return;
+    }
+
+    if (Array.isArray(valA) && Array.isArray(valB)) {
+      const maxLen = Math.max(valA.length, valB.length);
+      for (let i = 0; i < maxLen; i++) {
+        const itemPath = currentPath ? `${currentPath}.${i}` : `${i}`;
+        if (i >= valA.length || i >= valB.length) {
+          diffs.push(itemPath);
+        } else {
+          compare(valA[i], valB[i], itemPath);
+        }
+        if (diffs.length >= maxPaths) return;
+      }
+      return;
+    }
+
+    if (
+      typeA === "object" &&
+      typeB === "object" &&
+      !Array.isArray(valA) &&
+      !Array.isArray(valB)
+    ) {
+      const objA = valA as Record<string, unknown>;
+      const objB = valB as Record<string, unknown>;
+      const allKeys = Array.from(
+        new Set([...Object.keys(objA), ...Object.keys(objB)])
+      ).sort();
+
+      for (const key of allKeys) {
+        const propPath = currentPath ? `${currentPath}.${key}` : key;
+        if (!(key in objA) || !(key in objB)) {
+          diffs.push(propPath);
+        } else {
+          compare(objA[key], objB[key], propPath);
+        }
+        if (diffs.length >= maxPaths) return;
+      }
+      return;
+    }
+
+    // Primitive value difference
+    diffs.push(currentPath);
+  }
+
+  compare(a, b, prefix);
+  return diffs.slice(0, maxPaths);
+}
+
+/**
  * Classifies all matching causes of non-determinism in priority order.
  */
 export function classifyCauses(
@@ -129,7 +206,11 @@ export function classifyCauses(
 
   // 4. Iteration order: Object.keys | Object.entries | new Set | new Map with permuted outputs
   if (/Object\.keys|Object\.entries|new Set|new Map/.test(source)) {
-    if (first !== undefined && differing !== undefined && isPermutation(first, differing)) {
+    if (
+      first !== undefined &&
+      differing !== undefined &&
+      isPermutation(first, differing)
+    ) {
       causes.push("iteration-order");
     }
   }
@@ -194,7 +275,8 @@ export async function appendVerdict(
  * Runs a determinism census on a single notebook:
  * 1. Runs full baseline once.
  * 2. For each successful cell, materializes scopeBefore and replays `replays` times with identical scope.
- * 3. Logs each replay to ledgerPath and each verdict to resultsPath.
+ * 3. Handles transport failures (missing cell in successful run) by retrying once after 300ms, discarding if still missing.
+ * 4. Computes distinct outputs, diffPaths, and causes, writing to ledger and verdicts JSONL immediately.
  */
 export async function censusNotebook(
   notebookId: string,
@@ -215,7 +297,11 @@ export async function censusNotebook(
   for (const cell of executableCells) {
     const baselineResult = baseline.cell_results?.[cell.id];
     // Only census cells that succeeded in baseline
-    if (!baselineResult || baselineResult.error || baselineResult.output === undefined) {
+    if (
+      !baselineResult ||
+      baselineResult.error ||
+      baselineResult.output === undefined
+    ) {
       continue;
     }
 
@@ -224,17 +310,44 @@ export async function censusNotebook(
     const sourceHash = hashSource(source);
     const scopeInHash = scope.scopeHash;
 
-    const replayOutputs: Array<{ output: unknown; scopeOutHash: string | null }> = [];
+    const replayOutputs: Array<{
+      output: unknown;
+      scopeOutHash: string | null;
+    }> = [];
+    let usableReplays = 0;
+    let transportFailures = 0;
 
     // Replay cell `replays` times with identical materialized scope
     for (let r = 0; r < replays; r++) {
-      const { result, scopeOutHash } = await replayCell(
+      let { result, scopeOutHash } = await replayCell(
         notebookId,
         cell.id,
         scope,
         source,
         ledgerPath
       );
+
+      // Distinguish transport failure (missing cell result) from genuine cell error
+      if (result.error === "Cell result not found in run detail") {
+        // Wait 300ms and retry fetching/replaying once
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const retried = await replayCell(
+          notebookId,
+          cell.id,
+          scope,
+          source,
+          ledgerPath
+        );
+        result = retried.result;
+        scopeOutHash = retried.scopeOutHash;
+      }
+
+      if (result.error === "Cell result not found in run detail") {
+        transportFailures++;
+        continue; // Discarded from usable data and distinctOutputs
+      }
+
+      usableReplays++;
       replayOutputs.push({
         output: result.output,
         scopeOutHash,
@@ -243,23 +356,27 @@ export async function censusNotebook(
 
     const distinctHashes = new Set(replayOutputs.map((ro) => ro.scopeOutHash));
     const distinctOutputs = distinctHashes.size;
-    const deterministic = distinctOutputs === 1;
+    const deterministic = usableReplays > 0 && distinctOutputs === 1;
 
     let cause: DeterminismCause | null = null;
     let causes: DeterminismCause[] = [];
     let ambiguous = false;
     let sample: { first: unknown; differing: unknown } | null = null;
+    let diffPaths: string[] = [];
 
-    if (!deterministic) {
+    if (!deterministic && usableReplays > 1) {
       const first = replayOutputs[0].output;
       const firstHash = replayOutputs[0].scopeOutHash;
-      const differingEntry = replayOutputs.find((ro) => ro.scopeOutHash !== firstHash);
+      const differingEntry = replayOutputs.find(
+        (ro) => ro.scopeOutHash !== firstHash
+      );
       const differing = differingEntry ? differingEntry.output : undefined;
 
       causes = classifyCauses(source, first, differing);
       cause = causes[0];
       ambiguous = causes.length > 1;
       sample = { first, differing };
+      diffPaths = findDiffPaths(first, differing);
     }
 
     const verdict: CellVerdict = {
@@ -269,12 +386,15 @@ export async function censusNotebook(
       sourceHash,
       scopeInHash,
       replays,
+      usableReplays,
+      transportFailures,
       distinctOutputs,
       deterministic,
       cause,
       causes,
       ambiguous,
       sample,
+      diffPaths,
     };
 
     // 3. Write verdict append-only immediately

@@ -1,5 +1,5 @@
 /**
- * CLI Runner for Determinism Census (R4 / R4.1)
+ * CLI Runner for Determinism Census (R4 / R4.1 / R4.2)
  *
  * Usage:
  *   npx tsx src/run-census.ts --smoke
@@ -86,13 +86,15 @@ async function main() {
       } else {
         allVerdicts.push(...verdicts);
         for (const v of verdicts) {
+          const tfNote = v.transportFailures > 0 ? ` [${v.transportFailures} transport fail]` : "";
           if (v.deterministic) {
-            console.log(`  ✓ cell ${v.cellId}: deterministic (${v.replays}/${v.replays})`);
+            console.log(`  ✓ cell ${v.cellId}: deterministic (${v.usableReplays}/${v.replays})${tfNote}`);
           } else {
             const causesList = v.causes.join(", ");
             const ambiguousTag = v.ambiguous ? " (ambiguous / multiple causes)" : "";
+            const diffTag = v.diffPaths.length > 0 ? ` (diff: [${v.diffPaths.join(", ")}])` : "";
             console.log(
-              `  ✗ cell ${v.cellId}: non-deterministic (${v.distinctOutputs} distinct outputs) [causes: ${causesList}${ambiguousTag}]`
+              `  ✗ cell ${v.cellId}: non-deterministic (${v.distinctOutputs} distinct outputs, ${v.usableReplays}/${v.replays} usable)${tfNote} [causes: ${causesList}${ambiguousTag}]${diffTag}`
             );
           }
         }
@@ -113,6 +115,7 @@ async function main() {
   const deterministicCount = allVerdicts.filter((v) => v.deterministic).length;
   const nonDeterministicCount = allVerdicts.filter((v) => !v.deterministic).length;
   const ambiguousCellsCount = allVerdicts.filter((v) => v.ambiguous).length;
+  const totalTransportFailures = allVerdicts.reduce((acc, v) => acc + v.transportFailures, 0);
 
   const causeCounts: Record<DeterminismCause, number> = {
     "wall-clock": 0,
@@ -142,7 +145,7 @@ async function main() {
   const ratio = totalCells > 0 ? (deterministicCount / totalCells).toFixed(4) : "0";
 
   console.log("\n" + "=".repeat(55));
-  console.log("DETERMINISM CENSUS SUMMARY (H4)");
+  console.log("DETERMINISM CENSUS SUMMARY (H4 / R4.2)");
   console.log("=".repeat(55));
   console.log(`Notebooks in corpus:   ${notebooks.length}`);
   console.log(`Notebooks surveyed:    ${selected.length - skippedNotebooks.length}`);
@@ -156,6 +159,7 @@ async function main() {
     console.log(`  ${cause.padEnd(21)}${count}${ambigNote}`);
   }
   console.log(`  cells with >1 cause  ${ambiguousCellsCount}`);
+  console.log(`Total transport fail:  ${totalTransportFailures}`);
 
   if (skippedNotebooks.length > 0) {
     console.log("\nSkipped Notebooks Breakdown:");
