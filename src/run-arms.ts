@@ -15,6 +15,10 @@
  * - Incidental corpus: luckyPass = null, reported as "n/a".
  * - Previous heuristic renamed to offTargetFix = resolved && !editedCells.includes(mutation.cellId).
  *
+ * Summary Reporting:
+ * - Resolved rate reported twice: over all runs, and over runs without protocol/length failures.
+ * - protocolFailure and lengthFailure reported as distinct diagnostic categories.
+ *
  * Primary report axis: distBand (direct [0], short [1-3], long [4+])
  * Secondary report axes: hopBand (near, mid, far) and stratum (value-level, name-level).
  *
@@ -22,7 +26,8 @@
  *   npm run arms -- --smoke --designed --dist=long   # 3 mutations dist>=4, 3 distinct notebooks, 3 distinct operators
  *   npm run arms -- --smoke --designed --hop=far
  *   npm run arms -- --smoke
- *   npm run arms -- --designed                       # full benchmark on designed corpus
+ *   npm run arms -- --designed                       # full benchmark on designed corpus (30 mut x 3 arms)
+ *   npm run arms                                     # full benchmark on incidental corpus (39 mut x 3 arms)
  *   npm run arms -- --cleanup                        # remove any orphan zz-rewind-arm-*
  */
 
@@ -316,16 +321,21 @@ function printSummaryBlock(title: string, armRuns: ArmResult[], arms: string[]) 
       continue;
     }
 
-    const resolved = runs.filter((r) => r.resolved).length;
+    const protoFails = runs.filter((r) => r.protocolFailure).length;
+    const lengthFails = runs.filter((r) => r.lengthFailure).length;
+    const validRuns = runs.filter((r) => !r.protocolFailure && !r.lengthFailure);
+    const validTotal = validRuns.length;
+
+    const resolvedAll = runs.filter((r) => r.resolved).length;
+    const resolvedValid = validRuns.filter((r) => r.resolved).length;
+
     const luckyChecked = runs.filter((r) => r.luckyPass !== null);
     const luckyCount = runs.filter((r) => r.luckyPass === true).length;
     const luckyStr =
       luckyChecked.length === 0
         ? "n/a"
-        : `${luckyCount} / ${resolved} (${resolved > 0 ? ((luckyCount / resolved) * 100).toFixed(1) : "0.0"}%)`;
+        : `${luckyCount} / ${resolvedAll} (${resolvedAll > 0 ? ((luckyCount / resolvedAll) * 100).toFixed(1) : "0.0"}%)`;
     const offTargetCount = runs.filter((r) => r.offTargetFix).length;
-    const protoFails = runs.filter((r) => r.protocolFailure).length;
-    const lengthFails = runs.filter((r) => r.lengthFailure).length;
     const stopReasonCounts = runs.reduce((acc: Record<string, number>, r) => {
       acc[r.stopReason] = (acc[r.stopReason] || 0) + 1;
       return acc;
@@ -336,15 +346,16 @@ function printSummaryBlock(title: string, armRuns: ArmResult[], arms: string[]) 
     const avgAnswer = Math.round(runs.reduce((sum, r) => sum + r.answerTokens, 0) / total);
 
     console.log(`  Arm: ${arm.toUpperCase()}`);
-    console.log(`    Total runs:        ${total}`);
-    console.log(`    Resolved:          ${resolved} / ${total} (${((resolved / total) * 100).toFixed(1)}%)`);
-    console.log(`    Lucky passes:      ${luckyStr}`);
-    console.log(`    Off-target fixes:  ${offTargetCount}`);
-    console.log(`    Protocol failures: ${protoFails}`);
-    console.log(`    Length failures:   ${lengthFails}`);
-    console.log(`    Stop reasons:      ${JSON.stringify(stopReasonCounts)}`);
-    console.log(`    Avg turns:         ${avgTurns}`);
-    console.log(`    Avg tokens:        prompt=${avgPrompt}, reasoning=${avgReasoning}, ans=${avgAnswer}`);
+    console.log(`    Total runs:                 ${total}`);
+    console.log(`    Resolved (all runs):        ${resolvedAll} / ${total} (${((resolvedAll / total) * 100).toFixed(1)}%)`);
+    console.log(`    Resolved (valid protocol):  ${resolvedValid} / ${validTotal} (${validTotal > 0 ? ((resolvedValid / validTotal) * 100).toFixed(1) : "0.0"}%)`);
+    console.log(`    Protocol failures:          ${protoFails}`);
+    console.log(`    Length failures:            ${lengthFails}`);
+    console.log(`    Lucky passes (held-out):    ${luckyStr}`);
+    console.log(`    Off-target fixes:           ${offTargetCount}`);
+    console.log(`    Stop reasons:               ${JSON.stringify(stopReasonCounts)}`);
+    console.log(`    Avg turns:                  ${avgTurns}`);
+    console.log(`    Avg tokens:                 prompt=${avgPrompt}, reasoning=${avgReasoning}, ans=${avgAnswer}`);
   }
 }
 
@@ -393,6 +404,10 @@ async function main() {
 
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(transcriptsDir, { recursive: true });
+
+  if (!isSmoke && !args.includes("--append")) {
+    writeFileSync(armsPath, "", "utf8");
+  }
 
   const mutations = loadMutations(mutationsPath);
   if (mutations.length === 0) {
@@ -463,7 +478,7 @@ async function main() {
     : ["monolithic", "stepwise", "rewind"];
 
   const model = process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731";
-  const maxTokens = parseInt(process.env.ARM_MAX_TOKENS || "8000", 10);
+  const maxTokens = parseInt(process.env.ARM_MAX_TOKENS || "16000", 10);
   const maxTurns = 15;
 
   console.log("=======================================================");
@@ -494,6 +509,8 @@ async function main() {
 
   const results: ArmResult[] = [];
   const completionTokensList: number[] = [];
+  let retriedRunsCount = 0;
+  let consecutiveFailures = 0;
 
   const notebookCache: Record<string, { originalDoc: any; baselineRun: any; terminalCellId: string }> = {};
 
@@ -527,116 +544,152 @@ async function main() {
     const { originalDoc, baselineRun, terminalCellId } = notebookCache[mutation.notebookId];
 
     for (const arm of armsToRun) {
-      let scratchId: string | null = null;
-      let scratchName = "";
+      let armAttempts = 0;
+      let armSuccess = false;
 
-      try {
-        // 1. Duplicate notebook
-        const dup = await duplicateNotebook(mutation.notebookId);
-        scratchId = dup.id;
-        const scratchDoc: any = await getNotebook(scratchId);
-        const uuid8 = randomUUID().slice(0, 8);
-        scratchName = `zz-rewind-arm-${uuid8}`;
-        scratchDoc.name = scratchName;
+      while (armAttempts < 2 && !armSuccess) {
+        armAttempts++;
+        let scratchId: string | null = null;
+        let scratchName = "";
 
-        // 2. Inject mutated code into scratch notebook & save
-        updateCellSourceInDoc(scratchDoc.steps, mutation.cellId, mutation.mutatedSource);
-        await saveNotebookDoc(scratchDoc);
+        try {
+          // 1. Duplicate notebook
+          const dup = await duplicateNotebook(mutation.notebookId);
+          scratchId = dup.id;
+          const scratchDoc: any = await getNotebook(scratchId);
+          const uuid8 = randomUUID().slice(0, 8);
+          scratchName = `zz-rewind-arm-${uuid8}`;
+          scratchDoc.name = scratchName;
 
-        // 3. Execute mutated notebook ONCE to obtain concrete symptom
-        const actualRun = await runScratchNotebookFull(scratchId);
+          // 2. Inject mutated code into scratch notebook & save
+          updateCellSourceInDoc(scratchDoc.steps, mutation.cellId, mutation.mutatedSource);
+          await saveNotebookDoc(scratchDoc);
 
-        // 4. Build arm context
-        const ctx: ArmContext = {
-          mutation,
-          scratchNotebookDoc: scratchDoc,
-          originalDoc,
-          baselineRun,
-          actualRun,
-          terminalCellId,
-          saveScratchDoc: async (doc: any) => {
-            await saveNotebookDoc(doc);
-          },
-          runScratchCell: async (cellId: string, input?: Record<string, unknown>) => {
-            return await runCellInScratch(scratchId!, cellId, input);
-          },
-          model,
-          maxTokens,
-          maxTurns,
-        };
+          // 3. Execute mutated notebook ONCE to obtain concrete symptom
+          const actualRun = await runScratchNotebookFull(scratchId);
 
-        // 5. Run arm
-        let armExecutionResult: ArmResult & { messages: any[] };
-        if (arm === "monolithic") {
-          armExecutionResult = await runMonolithicArm(ctx);
-        } else if (arm === "stepwise") {
-          armExecutionResult = await runStepwiseArm(ctx);
-        } else {
-          armExecutionResult = await runRewindArm(ctx);
-        }
+          // 4. Build arm context
+          const ctx: ArmContext = {
+            mutation,
+            scratchNotebookDoc: scratchDoc,
+            originalDoc,
+            baselineRun,
+            actualRun,
+            terminalCellId,
+            saveScratchDoc: async (doc: any) => {
+              await saveNotebookDoc(doc);
+            },
+            runScratchCell: async (cellId: string, input?: Record<string, unknown>) => {
+              return await runCellInScratch(scratchId!, cellId, input);
+            },
+            model,
+            maxTokens,
+            maxTurns,
+          };
 
-        const { messages, ...armResult } = armExecutionResult;
+          // 5. Run arm
+          let armExecutionResult: ArmResult & { messages: any[] };
+          if (arm === "monolithic") {
+            armExecutionResult = await runMonolithicArm(ctx);
+          } else if (arm === "stepwise") {
+            armExecutionResult = await runStepwiseArm(ctx);
+          } else {
+            armExecutionResult = await runRewindArm(ctx);
+          }
 
-        // 6. Held-out Lucky-Pass Check (R7.0)
-        let luckyPass: boolean | null = null;
-        let heldOutHash: string | undefined = undefined;
+          const { messages, ...armResult } = armExecutionResult;
 
-        if (isDesigned && mutation.notebookName.startsWith("rb-designed-")) {
-          const heldoutFixturePath = join(process.cwd(), "fixtures", "designed", `${mutation.notebookName}.heldout.json`);
-          if (existsSync(heldoutFixturePath)) {
-            try {
-              const heldoutDoc = JSON.parse(readFileSync(heldoutFixturePath, "utf8"));
-              const heldoutSeedCode = heldoutDoc.steps?.[0]?.code;
-              const heldOutTruthHash = heldoutDoc.heldOutTruthHash;
+          // 6. Held-out Lucky-Pass Check (R7.0)
+          let luckyPass: boolean | null = null;
+          let heldOutHash: string | undefined = undefined;
 
-              if (heldoutSeedCode && heldOutTruthHash) {
-                // In the repaired scratchDoc, replace the first step's code with heldout seed
-                scratchDoc.steps[0].code = heldoutSeedCode;
-                await saveNotebookDoc(scratchDoc);
+          if (isDesigned && mutation.notebookName.startsWith("rb-designed-")) {
+            const heldoutFixturePath = join(process.cwd(), "fixtures", "designed", `${mutation.notebookName}.heldout.json`);
+            if (existsSync(heldoutFixturePath)) {
+              try {
+                const heldoutDoc = JSON.parse(readFileSync(heldoutFixturePath, "utf8"));
+                const heldoutSeedCode = heldoutDoc.steps?.[0]?.code;
+                const heldOutTruthHash = heldoutDoc.heldOutTruthHash;
 
-                const heldoutRun = await runScratchNotebookFull(scratchId!);
-                const heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+                if (heldoutSeedCode && heldOutTruthHash) {
+                  // In the repaired scratchDoc, replace the first step's code with heldout seed
+                  scratchDoc.steps[0].code = heldoutSeedCode;
+                  await saveNotebookDoc(scratchDoc);
 
-                if (!heldoutRun.error && heldoutOutput !== undefined) {
-                  heldOutHash = hashValue(heldoutOutput);
-                  luckyPass = armResult.resolved && (heldOutHash !== heldOutTruthHash);
-                } else {
-                  heldOutHash = "ERROR";
-                  luckyPass = armResult.resolved && true;
+                  const heldoutRun = await runScratchNotebookFull(scratchId!);
+                  const heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+
+                  if (!heldoutRun.error && heldoutOutput !== undefined) {
+                    heldOutHash = hashValue(heldoutOutput);
+                    luckyPass = armResult.resolved && (heldOutHash !== heldOutTruthHash);
+                  } else {
+                    heldOutHash = "ERROR";
+                    luckyPass = armResult.resolved && true;
+                  }
                 }
+              } catch (heldoutErr) {
+                console.log(`  ⚠ Held-out check error: ${heldoutErr}`);
               }
-            } catch (heldoutErr) {
-              console.log(`  ⚠ Held-out check error: ${heldoutErr}`);
             }
+          }
+
+          armResult.luckyPass = luckyPass;
+          armResult.heldOutHash = heldOutHash;
+
+          results.push(armResult);
+          appendArmResult(armsPath, armResult);
+          saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
+
+          const completionTokens = armResult.reasoningTokens + armResult.answerTokens;
+          completionTokensList.push(completionTokens);
+
+          const resIcon = armResult.resolved ? "✓ RESOLVED" : "✗ UNRESOLVED";
+          const lucky = armResult.luckyPass === true ? " [LUCKY PASS (held-out fail)]" : "";
+          const offTarget = armResult.offTargetFix ? " [OFF-TARGET FIX]" : "";
+          const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
+          const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
+          const heldoutNote = heldOutHash ? ` | heldOutHash: ${heldOutHash.slice(0, 8)}...` : "";
+          console.log(
+            `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${offTarget}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens}${heldoutNote} | ${armResult.wallMs}ms`
+          );
+
+          armSuccess = true;
+          if (armResult.protocolFailure) {
+            consecutiveFailures++;
+          } else {
+            consecutiveFailures = 0;
+          }
+        } catch (armErr) {
+          if (armAttempts < 2) {
+            retriedRunsCount++;
+            console.log(`  ⚠ Arm ${arm} encountered transport/execution error: ${armErr}. Retrying run (attempt ${armAttempts + 1}/2)...`);
+            await new Promise((res) => setTimeout(res, 2000));
+          } else {
+            consecutiveFailures++;
+            console.log(`  ✗ Arm ${arm} failed after retry: ${armErr}`);
+          }
+        } finally {
+          if (scratchId) {
+            await deleteNotebook(scratchId, scratchName);
           }
         }
 
-        armResult.luckyPass = luckyPass;
-        armResult.heldOutHash = heldOutHash;
-
-        results.push(armResult);
-        appendArmResult(armsPath, armResult);
-        saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
-
-        const completionTokens = armResult.reasoningTokens + armResult.answerTokens;
-        completionTokensList.push(completionTokens);
-
-        const resIcon = armResult.resolved ? "✓ RESOLVED" : "✗ UNRESOLVED";
-        const lucky = armResult.luckyPass === true ? " [LUCKY PASS (held-out fail)]" : "";
-        const offTarget = armResult.offTargetFix ? " [OFF-TARGET FIX]" : "";
-        const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
-        const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
-        const heldoutNote = heldOutHash ? ` | heldOutHash: ${heldOutHash.slice(0, 8)}...` : "";
-        console.log(
-          `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${offTarget}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens}${heldoutNote} | ${armResult.wallMs}ms`
-        );
-      } catch (armErr) {
-        console.log(`  -> Arm ${arm} failed with error: ${armErr}`);
-      } finally {
-        if (scratchId) {
-          await deleteNotebook(scratchId, scratchName);
+        if (consecutiveFailures >= 3) {
+          console.error("\n" + "!".repeat(65));
+          console.error("⚠ CIRCUIT BREAKER HALT: 3 consecutive systemic failures encountered.");
+          console.error("Stopping benchmark to prevent API credit exhaustion.");
+          console.error("!".repeat(65) + "\n");
+          break;
         }
       }
+
+      if (consecutiveFailures >= 3) {
+        break;
+      }
+    }
+
+    if (consecutiveFailures >= 3) {
+      break;
     }
   }
 
@@ -648,6 +701,9 @@ async function main() {
       : "R9 BENCHMARK SUMMARY REPORT"
   );
   console.log("=".repeat(65));
+  if (retriedRunsCount > 0) {
+    console.log(`Total transport/execution retried runs: ${retriedRunsCount}`);
+  }
 
   printSummaryBlock("OVERALL RESULTS", results, armsToRun);
 

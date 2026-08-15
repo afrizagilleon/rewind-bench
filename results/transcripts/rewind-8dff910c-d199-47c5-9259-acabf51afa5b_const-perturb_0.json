@@ -1,0 +1,58 @@
+{
+  "arm": "rewind",
+  "mutationId": "8dff910c-d199-47c5-9259-acabf51afa5b:const-perturb:0",
+  "stratum": "value-level",
+  "distanceToTerminal": 0,
+  "distBand": "direct",
+  "hopDistance": 8,
+  "hopBand": "far",
+  "notebookId": "085e7d28-9c34-4c25-8d4f-1bbbd41e0bed",
+  "notebookName": "rb-designed-credit-scoring",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "turns": 3,
+  "stopReason": "finished",
+  "resolved": true,
+  "luckyPass": false,
+  "offTargetFix": false,
+  "heldOutHash": "a0c112137e66675e2ff2ac83e42a99d01ff64140cffbe837e391336a69784480",
+  "editedCells": [
+    "8dff910c-d199-47c5-9259-acabf51afa5b"
+  ],
+  "wallMs": 31425,
+  "tokens": {
+    "promptTokens": 8476,
+    "reasoningTokens": 2293,
+    "answerTokens": 1256,
+    "totalTokens": 12025
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an automated code repair agent for zaatool reactive notebooks with Materialized Scope Replay.\nA notebook previously produced correct outputs but now fails or produces incorrect final outputs.\nYou are given the symptom (expected vs actual final output) and the entire notebook source upfront.\nWhen you read a cell using notebook_read, the recorded upstream state (scopeBefore) from the last good run is provided.\nWhen you execute a cell using notebook_run_cell without input, that exact recorded upstream scope is automatically supplied.\n\nAvailable actions (respond with exactly one JSON block):\n1. Read cell code & recorded upstream state:\n```json\n{\"action\": \"notebook_read\", \"cell\": \"<cell_id>\"}\n```\n2. Run cell (upstream scope auto-injected if input is omitted):\n```json\n{\"action\": \"notebook_run_cell\", \"cell\": \"<cell_id>\"}\n```\n3. Edit cell code:\n```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"<cell_id>\", \"code\": \"<new_code>\"}\n```\n4. Finish when repaired:\n```json\n{\"action\": \"finish\", \"reason\": \"<description_of_fix>\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 1 of 15.\n\nNotebook: \"rb-designed-credit-scoring\" (085e7d28-9c34-4c25-8d4f-1bbbd41e0bed)\n\n=== SYMPTOM ===\nExpected notebook final output (from terminal cell before the bug):\n```json\n{\n  \"approvedCount\": 7,\n  \"totalProfiles\": 10,\n  \"averageCreditScore\": 625,\n  \"portfolioAcceptable\": true,\n  \"averageApprovedAprPct\": 13.5,\n  \"totalCreditLimitAssigned\": 136000,\n  \"totalCapitalReservesCommitted\": 17200\n}\n```\n\nActual notebook final output (current faulty state):\nStatus: success\nOutput:\n```json\n{\n  \"approvedCount\": 7,\n  \"totalProfiles\": 10,\n  \"averageCreditScore\": 625,\n  \"portfolioAcceptable\": true,\n  \"averageApprovedAprPct\": 14.9,\n  \"totalCreditLimitAssigned\": 136000,\n  \"totalCapitalReservesCommitted\": 17200\n}\n```\n\n=== NOTEBOOK SOURCE CELLS ===\n--- Cell ID: fb749e22-5700-4da8-950e-93354af33d76 ---\n```javascript\nconst bureauProfiles = [\n  { id: 'BOR-101', age: 42, jobTenureYears: 9, inquiries6m: 0, utilPct: 22, late30d: 0, lines: 4 },\n  { id: 'BOR-102', age: 25, jobTenureYears: 1, inquiries6m: 3, utilPct: 82, late30d: 2, lines: 2 },\n  { id: 'BOR-103', age: 36, jobTenureYears: 6, inquiries6m: 1, utilPct: 35, late30d: 0, lines: 5 },\n  { id: 'BOR-104', age: 51, jobTenureYears: 15, inquiries6m: 0, utilPct: 15, late30d: 0, lines: 8 },\n  { id: 'BOR-105', age: 29, jobTenureYears: 3, inquiries6m: 2, utilPct: 65, late30d: 1, lines: 3 },\n  { id: 'BOR-106', age: 47, jobTenureYears: 11, inquiries6m: 1, utilPct: 40, late30d: 0, lines: 6 },\n  { id: 'BOR-107', age: 31, jobTenureYears: 4, inquiries6m: 4, utilPct: 89, late30d: 3, lines: 4 },\n  { id: 'BOR-108', age: 39, jobTenureYears: 8, inquiries6m: 0, utilPct: 28, late30d: 0, lines: 5 },\n  { id: 'BOR-109', age: 28, jobTenureYears: 2, inquiries6m: 2, utilPct: 55, late30d: 1, lines: 2 },\n  { id: 'BOR-110', age: 58, jobTenureYears: 20, inquiries6m: 0, utilPct: 10, late30d: 0, lines: 7 },\n];\nreturn { bureauProfiles };\n```\n\n--- Cell ID: b91e2a43-2c5c-406d-bf5c-ed75178346ab ---\n```javascript\nconst binned = inputs.bureauProfiles.map((p) => {\n  const ageBin = p.age < 30 ? 'YOUNG' : p.age < 50 ? 'MID' : 'SENIOR';\n  const utilBin = p.utilPct < 30 ? 'LOW' : p.utilPct < 60 ? 'MED' : 'HIGH';\n  const inqBin = p.inquiries6m === 0 ? 'ZERO' : p.inquiries6m <= 2 ? 'FEW' : 'MANY';\n  return {\n    ...p,\n    ageBin,\n    utilBin,\n    inqBin,\n  };\n});\nreturn { binnedProfiles: binned };\n```\n\n--- Cell ID: d90b0e87-6314-4c9a-82f3-2a4f18fc3cad ---\n```javascript\nconst WOE_TABLE = {\n  ageBin: { YOUNG: -0.35, MID: 0.20, SENIOR: 0.45 },\n  utilBin: { LOW: 0.65, MED: 0.10, HIGH: -0.80 },\n  inqBin: { ZERO: 0.40, FEW: -0.15, MANY: -0.75 },\n};\n\nconst transformed = inputs.binnedProfiles.map((p) => {\n  const wAge = WOE_TABLE.ageBin[p.ageBin] || 0;\n  const wUtil = WOE_TABLE.utilBin[p.utilBin] || 0;\n  const wInq = WOE_TABLE.inqBin[p.inqBin] || 0;\n  const wLate = p.late30d === 0 ? 0.50 : p.late30d === 1 ? -0.30 : -1.10;\n  return {\n    id: p.id,\n    wAge,\n    wUtil,\n    wInq,\n    wLate,\n    lines: p.lines,\n  };\n});\nreturn { woeProfiles: transformed };\n```\n\n--- Cell ID: e8ec7cc4-ff6c-468e-8599-70c077f2e1e4 ---\n```javascript\nconst withLogits = inputs.woeProfiles.map((p) => {\n  const logit = 0.5 + (p.wAge * 0.8) + (p.wUtil * 1.4) + (p.wInq * 0.9) + (p.wLate * 1.6) + (p.lines * 0.05);\n  return {\n    id: p.id,\n    logit: Math.round(logit * 1000) / 1000,\n  };\n});\nreturn { logitProfiles: withLogits };\n```\n\n--- Cell ID: fa5173e2-bec2-4bd0-b4d3-19008905f623 ---\n```javascript\n// Scale logit to standard credit score (PDO = 20, Target 600 at logit 0)\nconst scaled = inputs.logitProfiles.map((p) => {\n  const score = 600 + (p.logit * 28.85);\n  let finalScore = Math.round(score);\n  if (finalScore > 850) finalScore = 850;\n  if (finalScore < 300) finalScore = 300;\n  return {\n    id: p.id,\n    creditScore: finalScore,\n  };\n});\nreturn { creditScores: scaled };\n```\n\n--- Cell ID: bfc920cc-18a9-4bbb-a45c-6bc93a704987 ---\n```javascript\nconst tiered = inputs.creditScores.map((s) => {\n  let tier = 'SUBPRIME';\n  let maxLimit = 5000;\n  if (s.creditScore >= 740) {\n    tier = 'PRIME';\n    maxLimit = 50000;\n  } else if (s.creditScore >= 670) {\n    tier = 'NEAR_PRIME';\n    maxLimit = 25000;\n  } else if (s.creditScore >= 580) {\n    tier = 'ACCEPTABLE';\n    maxLimit = 12000;\n  }\n  return {\n    ...s,\n    tier,\n    maxLimit,\n  };\n});\nreturn { tieredDecisions: tiered };\n```\n\n--- Cell ID: 3286f14d-1f2b-4fb5-9262-807ebc642da2 ---\n```javascript\nconst priced = inputs.tieredDecisions.map((d) => {\n  const baseRate = 0.075;\n  const spread = d.tier === 'PRIME' ? 0.02 : d.tier === 'NEAR_PRIME' ? 0.045 : d.tier === 'ACCEPTABLE' ? 0.08 : 0.14;\n  return {\n    ...d,\n    offeredApr: Math.round((baseRate + spread) * 1000) / 10,\n    approved: d.tier !== 'SUBPRIME',\n  };\n});\nreturn { portfolioPricing: priced };\n```\n\n--- Cell ID: 167ff955-27a0-4bf8-babd-2bc1e5978995 ---\n```javascript\nconst allocatedCapital = inputs.portfolioPricing.map((p) => {\n  const reserveRatio = p.tier === 'PRIME' ? 0.05 : p.tier === 'NEAR_PRIME' ? 0.10 : 0.20;\n  const requiredCapitalReserve = Math.round(p.maxLimit * reserveRatio);\n  return {\n    ...p,\n    requiredCapitalReserve,\n  };\n});\nreturn { allocatedCapital };\n```\n\n--- Cell ID: 8dff910c-d199-47c5-9259-acabf51afa5b ---\n```javascript\nconst items = inputs.allocatedCapital;\nlet sumScore = 0;\nlet approvedCount = 0;\nlet totalLimit = 0;\nlet sumApr = 0;\nlet totalReserves = 0;\n\nfor (const it of items) {\n  sumScore += it.creditScore;\n  if (it.approved) {\n    approvedCount++;\n    totalLimit += it.maxLimit;\n    sumApr += it.offeredApr;\n    totalReserves += it.requiredCapitalReserve;\n  }\n}\n\nconst avgScore = Math.round(sumScore / (items.length || 1));\nconst avgApr = approvedCount > 0 ? Math.round((sumApr / approvedCount) * 11) / 10 : 0;\n\nreturn {\n  totalProfiles: items.length,\n  averageCreditScore: avgScore,\n  approvedCount,\n  totalCreditLimitAssigned: totalLimit,\n  totalCapitalReservesCommitted: totalReserves,\n  averageApprovedAprPct: avgApr,\n  portfolioAcceptable: avgScore >= 600 && approvedCount >= 4,\n};\n```\n\nInvestigate the cells and their upstream state, locate the bug, repair it with notebook_edit_cell, and finish."
+    },
+    {
+      "role": "assistant",
+      "content": "{\"action\":\"notebook_edit_cell\",\"cell\":\"8dff910c-d199-47c5-9259-acabf51afa5b\",\"code\":\"const items = inputs.allocatedCapital;\\nlet sumScore = 0;\\nlet approvedCount = 0;\\nlet totalLimit = 0;\\nlet sumApr = 0;\\nlet totalReserves = 0;\\n\\nfor (const it of items) {\\n  sumScore += it.creditScore;\\n  if (it.approved) {\\n    approvedCount++;\\n    totalLimit += it.maxLimit;\\n    sumApr += it.offeredApr;\\n    totalReserves += it.requiredCapitalReserve;\\n  }\\n}\\n\\nconst avgScore = Math.round(sumScore / (items.length || 1));\\nconst avgApr = approvedCount > 0 ? Math.round((sumApr / approvedCount) * 10) / 10 : 0;\\n\\nreturn {\\n  totalProfiles: items.length,\\n  averageCreditScore: avgScore,\\n  approvedCount,\\n  totalCreditLimitAssigned: totalLimit,\\n  totalCapitalReservesCommitted: totalReserves,\\n  averageApprovedAprPct: avgApr,\\n  portfolioAcceptable: avgScore >= 600 && approvedCount >= 4,\\n};\"}"
+    },
+    {
+      "role": "user",
+      "content": "Turn 2 of 15.\n\nCell 8dff910c-d199-47c5-9259-acabf51afa5b updated successfully."
+    },
+    {
+      "role": "assistant",
+      "content": "{\"action\":\"notebook_run_cell\",\"cell\":\"8dff910c-d199-47c5-9259-acabf51afa5b\"}"
+    },
+    {
+      "role": "user",
+      "content": "Turn 3 of 15.\n\nCell output:\n{\n  \"approvedCount\": 7,\n  \"totalProfiles\": 10,\n  \"averageCreditScore\": 625,\n  \"portfolioAcceptable\": true,\n  \"averageApprovedAprPct\": 13.5,\n  \"totalCreditLimitAssigned\": 136000,\n  \"totalCapitalReservesCommitted\": 17200\n}"
+    },
+    {
+      "role": "assistant",
+      "content": "{\"action\":\"finish\",\"reason\":\"Fixed rounding bug in average APR calculation: changed multiplier from 11 to 10 so averageApprovedAprPct computes correctly as 13.5 instead of 14.9.\"}"
+    }
+  ]
+}

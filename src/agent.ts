@@ -106,7 +106,7 @@ export async function runAgentLoop(
   const apiKey = requireEnv("FEATHERLESS_API_KEY");
   const baseUrl = (process.env.FEATHERLESS_BASE_URL?.trim() || "https://api.featherless.ai/v1").replace(/\/+$/, "");
   const model = config.model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731";
-  const maxTokens = config.maxTokens || parseInt(process.env.ARM_MAX_TOKENS || "8000", 10);
+  const maxTokens = config.maxTokens || parseInt(process.env.ARM_MAX_TOKENS || "16000", 10);
   const temperature = config.temperature ?? 0;
   const seed = config.seed ?? 42;
   const reasoningEffort = config.reasoningEffort || "low";
