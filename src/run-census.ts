@@ -1,20 +1,21 @@
 /**
- * CLI Runner for Determinism Census (R4)
+ * CLI Runner for Determinism Census (R4 / R4.1)
  *
  * Usage:
  *   npx tsx src/run-census.ts --smoke
  *   npx tsx src/run-census.ts --replays=3 --limit=3
- *   npx tsx src/run-census.ts --replays=10
+ *   npx tsx src/run-census.ts --replays=10 --fresh
  */
 
 import { listNotebooks } from "./client";
 import { censusNotebook, type CellVerdict, type DeterminismCause } from "./determinism";
 import { join } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { rmSync, mkdirSync } from "node:fs";
 
 async function main() {
   const args = process.argv.slice(2);
   const isSmoke = args.includes("--smoke");
+  const isFresh = args.includes("--fresh") || (!isSmoke && !args.some((a) => a.startsWith("--notebook")));
 
   let replays = isSmoke ? 3 : 10;
   let limit = isSmoke ? 3 : 0;
@@ -36,6 +37,18 @@ async function main() {
   const ledgerPath = join(resultsDir, "ledger.jsonl");
   const resultsPath = join(resultsDir, "determinism.jsonl");
 
+  mkdirSync(resultsDir, { recursive: true });
+
+  if (isFresh) {
+    try {
+      rmSync(ledgerPath, { force: true });
+      rmSync(resultsPath, { force: true });
+      console.log("Cleared previous ledger and verdict results for fresh census run.");
+    } catch {
+      // ignore
+    }
+  }
+
   console.log(`Starting Determinism Census (replays=${replays}, limit=${limit || "all"})...`);
   console.log(`Ledger: ${ledgerPath}`);
   console.log(`Verdicts: ${resultsPath}\n`);
@@ -48,7 +61,6 @@ async function main() {
       (nb) => nb.id === targetNotebook || nb.name === targetNotebook
     );
   } else if (limit > 0) {
-    // Ensure zz-uji-paralel-3 is included in smoke test if present
     const testNb = notebooks.find((nb) => nb.name === "zz-uji-paralel-3");
     const others = notebooks.filter((nb) => nb.name !== "zz-uji-paralel-3");
     selected = testNb ? [testNb, ...others.slice(0, limit - 1)] : others.slice(0, limit);
@@ -57,25 +69,42 @@ async function main() {
   console.log(`Surveying ${selected.length} notebook(s)...`);
 
   const allVerdicts: CellVerdict[] = [];
+  const skippedNotebooks: Array<{ name: string; id: string; reason: string }> = [];
 
   for (let idx = 0; idx < selected.length; idx++) {
     const nb = selected[idx];
     console.log(`\n[${idx + 1}/${selected.length}] Notebook: ${nb.name} (${nb.id})`);
     try {
       const verdicts = await censusNotebook(nb.id, replays, ledgerPath, resultsPath);
-      allVerdicts.push(...verdicts);
-
-      for (const v of verdicts) {
-        if (v.deterministic) {
-          console.log(`  ✓ cell ${v.cellId}: deterministic (${v.replays}/${v.replays})`);
-        } else {
-          console.log(
-            `  ✗ cell ${v.cellId}: non-deterministic (${v.distinctOutputs} distinct outputs) [cause: ${v.cause}]`
-          );
+      if (verdicts.length === 0) {
+        skippedNotebooks.push({
+          name: nb.name,
+          id: nb.id,
+          reason: "No successful executable cells in baseline run",
+        });
+        console.log(`  ⚠ Skipped: no successful executable cells in baseline run`);
+      } else {
+        allVerdicts.push(...verdicts);
+        for (const v of verdicts) {
+          if (v.deterministic) {
+            console.log(`  ✓ cell ${v.cellId}: deterministic (${v.replays}/${v.replays})`);
+          } else {
+            const causesList = v.causes.join(", ");
+            const ambiguousTag = v.ambiguous ? " (ambiguous / multiple causes)" : "";
+            console.log(
+              `  ✗ cell ${v.cellId}: non-deterministic (${v.distinctOutputs} distinct outputs) [causes: ${causesList}${ambiguousTag}]`
+            );
+          }
         }
       }
     } catch (err: unknown) {
-      console.error(`  Error running census on ${nb.name}:`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      skippedNotebooks.push({
+        name: nb.name,
+        id: nb.id,
+        reason: message,
+      });
+      console.error(`  ⚠ Skipped notebook ${nb.name}: ${message}`);
     }
   }
 
@@ -83,6 +112,7 @@ async function main() {
   const totalCells = allVerdicts.length;
   const deterministicCount = allVerdicts.filter((v) => v.deterministic).length;
   const nonDeterministicCount = allVerdicts.filter((v) => !v.deterministic).length;
+  const ambiguousCellsCount = allVerdicts.filter((v) => v.ambiguous).length;
 
   const causeCounts: Record<DeterminismCause, number> = {
     "wall-clock": 0,
@@ -92,26 +122,48 @@ async function main() {
     unknown: 0,
   };
 
+  const causeAmbiguousCounts: Record<DeterminismCause, number> = {
+    "wall-clock": 0,
+    prng: 0,
+    network: 0,
+    "iteration-order": 0,
+    unknown: 0,
+  };
+
   for (const v of allVerdicts) {
-    if (v.cause) {
-      causeCounts[v.cause]++;
+    for (const c of v.causes) {
+      causeCounts[c]++;
+      if (v.ambiguous) {
+        causeAmbiguousCounts[c]++;
+      }
     }
   }
 
   const ratio = totalCells > 0 ? (deterministicCount / totalCells).toFixed(4) : "0";
 
-  console.log("\n" + "=".repeat(50));
-  console.log("DETERMINISM CENSUS SUMMARY");
-  console.log("=".repeat(50));
+  console.log("\n" + "=".repeat(55));
+  console.log("DETERMINISM CENSUS SUMMARY (H4)");
+  console.log("=".repeat(55));
+  console.log(`Notebooks in corpus:   ${notebooks.length}`);
+  console.log(`Notebooks surveyed:    ${selected.length - skippedNotebooks.length}`);
+  console.log(`Notebooks skipped:     ${skippedNotebooks.length}`);
   console.log(`Cells surveyed:        ${totalCells}`);
   console.log(`Deterministic:         ${deterministicCount}  (r = ${ratio})`);
   console.log(`Non-deterministic:     ${nonDeterministicCount}`);
-  console.log(`  wall-clock           ${causeCounts["wall-clock"]}`);
-  console.log(`  prng                 ${causeCounts["prng"]}`);
-  console.log(`  network              ${causeCounts["network"]}`);
-  console.log(`  iteration-order      ${causeCounts["iteration-order"]}`);
-  console.log(`  unknown              ${causeCounts["unknown"]}`);
-  console.log("=".repeat(50));
+  for (const [cause, count] of Object.entries(causeCounts) as [DeterminismCause, number][]) {
+    const ambig = causeAmbiguousCounts[cause];
+    const ambigNote = ambig > 0 ? `   (${ambig} ambiguous)` : "";
+    console.log(`  ${cause.padEnd(21)}${count}${ambigNote}`);
+  }
+  console.log(`  cells with >1 cause  ${ambiguousCellsCount}`);
+
+  if (skippedNotebooks.length > 0) {
+    console.log("\nSkipped Notebooks Breakdown:");
+    for (const sn of skippedNotebooks) {
+      console.log(`  - ${sn.name} (${sn.id}): ${sn.reason}`);
+    }
+  }
+  console.log("=".repeat(55));
 }
 
 main().catch((err) => {

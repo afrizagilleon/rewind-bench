@@ -1,13 +1,14 @@
 /**
- * Determinism Census (R4 / H4)
+ * Determinism Census (R4 / R4.1 / H4)
  *
  * Measures cell output reproducibility under identical materialized scopes
- * across multiple replays and classifies causes of non-determinism.
+ * across multiple replays and classifies causes of non-determinism, including
+ * reporting all overlapping/ambiguous causes per cell.
  */
 
 import { mkdir, appendFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { canonicalize, hashValue, hashSource } from "./ledger";
+import { dirname } from "node:path";
+import { canonicalize, hashSource } from "./ledger";
 import { getNotebook, runNotebook } from "./client";
 import { scopeBefore, replayCell } from "./msr";
 
@@ -27,7 +28,16 @@ export interface CellVerdict {
   replays: number;
   distinctOutputs: number;
   deterministic: boolean; // distinctOutputs === 1
-  cause: DeterminismCause | null; // null if deterministic
+
+  /** Dominant / first matching cause — kept for backward compatibility and compact tables. */
+  cause: DeterminismCause | null;
+
+  /** All matching causes in priority order. Can contain more than one. Empty array if deterministic. */
+  causes: DeterminismCause[];
+
+  /** True if more than one cause pattern matches (causes.length > 1). */
+  ambiguous: boolean;
+
   sample: { first: unknown; differing: unknown } | null;
 }
 
@@ -93,37 +103,55 @@ export function isPermutation(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Classifies the cause of non-determinism using ordered heuristics (first match wins).
+ * Classifies all matching causes of non-determinism in priority order.
+ */
+export function classifyCauses(
+  source: string,
+  first?: unknown,
+  differing?: unknown
+): DeterminismCause[] {
+  const causes: DeterminismCause[] = [];
+
+  // 1. PRNG: Math.random | randomUUID | randomBytes | uuid
+  if (/Math\.random|randomUUID|randomBytes|\buuid\b/.test(source)) {
+    causes.push("prng");
+  }
+
+  // 2. Wall-clock: Date.now | new Date | performance.now | toISOString | Date()
+  if (/Date\.now|new Date|performance\.now|toISOString|Date\(\)/.test(source)) {
+    causes.push("wall-clock");
+  }
+
+  // 3. Network: fetch | http:// | https:// | axios | notebooks.run
+  if (/\bfetch\s*\(|https?:\/\/|axios|notebooks\.run/.test(source)) {
+    causes.push("network");
+  }
+
+  // 4. Iteration order: Object.keys | Object.entries | new Set | new Map with permuted outputs
+  if (/Object\.keys|Object\.entries|new Set|new Map/.test(source)) {
+    if (first !== undefined && differing !== undefined && isPermutation(first, differing)) {
+      causes.push("iteration-order");
+    }
+  }
+
+  // 5. Unknown if no patterns matched
+  if (causes.length === 0) {
+    causes.push("unknown");
+  }
+
+  return causes;
+}
+
+/**
+ * Classifies the dominant cause of non-determinism (first match wins).
  */
 export function classifyCause(
   source: string,
   first: unknown,
   differing: unknown
 ): DeterminismCause {
-  // 1. PRNG: Math.random | randomUUID | randomBytes | uuid
-  if (/Math\.random|randomUUID|randomBytes|\buuid\b/.test(source)) {
-    return "prng";
-  }
-
-  // 2. Wall-clock: Date.now | new Date | performance.now | toISOString | Date()
-  if (/Date\.now|new Date|performance\.now|toISOString|Date\(\)/.test(source)) {
-    return "wall-clock";
-  }
-
-  // 3. Network: fetch | http:// | https:// | axios | notebooks.run
-  if (/\bfetch\s*\(|https?:\/\/|axios|notebooks\.run/.test(source)) {
-    return "network";
-  }
-
-  // 4. Iteration order: Object.keys | Object.entries | new Set | new Map with permuted outputs
-  if (/Object\.keys|Object\.entries|new Set|new Map/.test(source)) {
-    if (isPermutation(first, differing)) {
-      return "iteration-order";
-    }
-  }
-
-  // 5. Unknown
-  return "unknown";
+  const causes = classifyCauses(source, first, differing);
+  return causes[0];
 }
 
 /**
@@ -218,6 +246,8 @@ export async function censusNotebook(
     const deterministic = distinctOutputs === 1;
 
     let cause: DeterminismCause | null = null;
+    let causes: DeterminismCause[] = [];
+    let ambiguous = false;
     let sample: { first: unknown; differing: unknown } | null = null;
 
     if (!deterministic) {
@@ -226,7 +256,9 @@ export async function censusNotebook(
       const differingEntry = replayOutputs.find((ro) => ro.scopeOutHash !== firstHash);
       const differing = differingEntry ? differingEntry.output : undefined;
 
-      cause = classifyCause(source, first, differing);
+      causes = classifyCauses(source, first, differing);
+      cause = causes[0];
+      ambiguous = causes.length > 1;
       sample = { first, differing };
     }
 
@@ -240,6 +272,8 @@ export async function censusNotebook(
       distinctOutputs,
       deterministic,
       cause,
+      causes,
+      ambiguous,
       sample,
     };
 
