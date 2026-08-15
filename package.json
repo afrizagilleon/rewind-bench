@@ -7,7 +7,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run",
+    "test:unit": "vitest run test/client.unit.test.ts test/ledger.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
