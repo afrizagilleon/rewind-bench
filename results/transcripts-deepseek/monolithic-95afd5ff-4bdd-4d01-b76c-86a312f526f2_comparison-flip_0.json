@@ -1,0 +1,50 @@
+{
+  "arm": "monolithic",
+  "mutationId": "95afd5ff-4bdd-4d01-b76c-86a312f526f2:comparison-flip:0",
+  "stratum": "value-level",
+  "distanceToTerminal": 3,
+  "distBand": "short",
+  "hopDistance": 3,
+  "hopBand": "mid",
+  "notebookId": "bf93ff1e-c517-46d4-9552-12aec6a64cce",
+  "notebookName": "rb-designed-risk-assessment",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "turns": 2,
+  "stopReason": "finished",
+  "resolved": true,
+  "luckyPass": false,
+  "offTargetFix": false,
+  "heldOutHash": "e44acbe016967a9883c249bf46de7dbbb3e79ec5e98172f795185a4c1fcb0853",
+  "editedCells": [
+    "95afd5ff-4bdd-4d01-b76c-86a312f526f2"
+  ],
+  "wallMs": 50536,
+  "tokens": {
+    "promptTokens": 4353,
+    "reasoningTokens": 4959,
+    "answerTokens": 1945,
+    "totalTokens": 11257
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an automated code repair agent for zaatool reactive notebooks.\nA notebook previously produced correct outputs but now fails or produces incorrect final outputs.\nYou are given the symptom (expected vs actual final output) and the entire notebook source.\nYou must trace the dataflow, locate the faulty cell, repair it using the notebook_edit_cell action, and call finish.\nNote: notebook_run_cell is DISABLED in monolithic mode.\n\nRespond ONLY with a fenced JSON code block:\n```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"<cell_id>\", \"code\": \"<repaired_code>\"}\n```\nor\n```json\n{\"action\": \"finish\", \"reason\": \"<description_of_fix>\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 1 of 15.\n\nNotebook: \"rb-designed-risk-assessment\" (bf93ff1e-c517-46d4-9552-12aec6a64cce)\n\n=== SYMPTOM ===\nExpected notebook final output (from terminal cell before the bug):\n```json\n{\n  \"approvedCount\": 4,\n  \"portfolioStatus\": \"HEALTHY\",\n  \"totalApplicants\": 8,\n  \"committedCapital\": 385000,\n  \"totalLossProvision\": 2696.18,\n  \"lossProvisionRatioPct\": 0.7\n}\n```\n\nActual notebook final output (current faulty state):\nStatus: success\nOutput:\n```json\n{\n  \"approvedCount\": 4,\n  \"portfolioStatus\": \"HEALTHY\",\n  \"totalApplicants\": 8,\n  \"committedCapital\": 385000,\n  \"totalLossProvision\": 2122.91,\n  \"lossProvisionRatioPct\": 0.55\n}\n```\n\n=== NOTEBOOK SOURCE CELLS ===\n--- Cell ID: 8eb26c83-8077-4337-aa61-ed3350e0ad84 ---\n```javascript\nconst applicants = [\n  { id: 'APP-01', age: 34, monthlyIncome: 15000, monthlyDebt: 3500, creditHistoryYears: 8, missedPayments: 0, loanAmount: 60000, collateralValue: 90000 },\n  { id: 'APP-02', age: 26, monthlyIncome: 7500, monthlyDebt: 3200, creditHistoryYears: 3, missedPayments: 2, loanAmount: 40000, collateralValue: 45000 },\n  { id: 'APP-03', age: 48, monthlyIncome: 28000, monthlyDebt: 6000, creditHistoryYears: 18, missedPayments: 0, loanAmount: 150000, collateralValue: 250000 },\n  { id: 'APP-04', age: 31, monthlyIncome: 11000, monthlyDebt: 4800, creditHistoryYears: 6, missedPayments: 1, loanAmount: 50000, collateralValue: 55000 },\n  { id: 'APP-05', age: 55, monthlyIncome: 22000, monthlyDebt: 2500, creditHistoryYears: 25, missedPayments: 0, loanAmount: 80000, collateralValue: 160000 },\n  { id: 'APP-06', age: 23, monthlyIncome: 5200, monthlyDebt: 2800, creditHistoryYears: 1, missedPayments: 3, loanAmount: 30000, collateralValue: 28000 },\n  { id: 'APP-07', age: 41, monthlyIncome: 18500, monthlyDebt: 5500, creditHistoryYears: 12, missedPayments: 0, loanAmount: 95000, collateralValue: 130000 },\n  { id: 'APP-08', age: 37, monthlyIncome: 13000, monthlyDebt: 5900, creditHistoryYears: 9, missedPayments: 1, loanAmount: 70000, collateralValue: 80000 },\n];\nreturn { applicants };\n```\n\n--- Cell ID: 0423a307-7710-4b98-82bd-aae49a6caf6d ---\n```javascript\nconst dtiProfiles = inputs.applicants.map((a) => {\n  const dti = (a.monthlyDebt / a.monthlyIncome) * 100;\n  let dtiScore = 100 - (dti * 1.5);\n  if (dtiScore < 0) dtiScore = 0;\n  return {\n    ...a,\n    dtiRatio: Math.round(dti * 100) / 100,\n    dtiScore: Math.round(dtiScore * 100) / 100,\n  };\n});\nreturn { dtiProfiles };\n```\n\n--- Cell ID: 8aafc3f1-a894-4b76-b726-c4a7e605cb88 ---\n```javascript\nconst ltvProfiles = inputs.dtiProfiles.map((a) => {\n  const ltv = (a.loanAmount / a.collateralValue) * 100;\n  let ltvScore = 100 - ((ltv - 50) * 1.2);\n  if (ltvScore > 100) ltvScore = 100;\n  if (ltvScore < 0) ltvScore = 0;\n  return {\n    ...a,\n    ltvRatio: Math.round(ltv * 100) / 100,\n    ltvScore: Math.round(ltvScore * 100) / 100,\n  };\n});\nreturn { ltvProfiles };\n```\n\n--- Cell ID: 95afd5ff-4bdd-4d01-b76c-86a312f526f2 ---\n```javascript\nconst capacityProfiles = inputs.ltvProfiles.map((a) => {\n  const estimatedMonthlyInstallment = (a.loanAmount * 0.08) / 12;\n  const disposableIncome = a.monthlyIncome - a.monthlyDebt - estimatedMonthlyInstallment;\n  const capacityRatio = disposableIncome / a.monthlyIncome;\n  let capacityScore = capacityRatio * 150;\n  if (capacityScore < 100) capacityScore = 100;\n  if (capacityScore < 0) capacityScore = 0;\n  return {\n    ...a,\n    disposableIncome: Math.round(disposableIncome),\n    capacityScore: Math.round(capacityScore * 100) / 100,\n  };\n});\nreturn { capacityProfiles };\n```\n\n--- Cell ID: b143f174-8e7c-455e-984b-efff641fbf35 ---\n```javascript\nconst historyScores = inputs.capacityProfiles.map((a) => {\n  let penalty = a.missedPayments * 22;\n  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);\n  let baseScore = 75 - penalty + bonus;\n  if (baseScore > 100) baseScore = 100;\n  if (baseScore < 0) baseScore = 0;\n  return {\n    ...a,\n    creditBehaviorScore: Math.round(baseScore * 100) / 100,\n  };\n});\nreturn { historyScores };\n```\n\n--- Cell ID: 9411fe51-6722-4596-9d4e-1c9f2c023bfe ---\n```javascript\nconst riskScores = inputs.historyScores.map((a) => {\n  const composite = (a.dtiScore * 0.30) + (a.ltvScore * 0.25) + (a.capacityScore * 0.25) + (a.creditBehaviorScore * 0.20);\n  const riskIndex = 100 - composite;\n  const stressedIndex = riskIndex * 1.15;\n  const expectedDefaultRate = Math.pow(stressedIndex / 100, 2) * 0.25;\n  const expectedLoss = a.loanAmount * expectedDefaultRate;\n  const approved = stressedIndex < 42;\n  return {\n    id: a.id,\n    approved,\n    loanAmount: a.loanAmount,\n    riskIndex: Math.round(riskIndex * 100) / 100,\n    expectedLoss: Math.round(expectedLoss * 100) / 100,\n  };\n});\nreturn { riskScores };\n```\n\n--- Cell ID: 06af996f-ab97-4215-86c3-4600e53e987d ---\n```javascript\nconst portfolio = inputs.riskScores;\nlet approvedCount = 0;\nlet committedCapital = 0;\nlet totalLossProvision = 0;\n\nfor (const p of portfolio) {\n  if (p.approved) {\n    approvedCount++;\n    committedCapital += p.loanAmount;\n    totalLossProvision += p.expectedLoss;\n  }\n}\n\nconst lossProvisionRatio = Math.round((totalLossProvision / (committedCapital || 1)) * 10000) / 100;\n\nreturn {\n  totalApplicants: portfolio.length,\n  approvedCount,\n  committedCapital,\n  totalLossProvision: Math.round(totalLossProvision * 100) / 100,\n  lossProvisionRatioPct: lossProvisionRatio,\n  portfolioStatus: approvedCount >= 4 ? 'HEALTHY' : 'CONSTRAINED',\n};\n```\n\nLocate the bug causing the final output discrepancy, fix it using notebook_edit_cell, and finish."
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"95afd5ff-4bdd-4d01-b76c-86a312f526f2\", \"code\": \"const capacityProfiles = inputs.ltvProfiles.map((a) => {\\n  const estimatedMonthlyInstallment = (a.loanAmount * 0.08) / 12;\\n  const disposableIncome = a.monthlyIncome - a.monthlyDebt - estimatedMonthlyInstallment;\\n  const capacityRatio = disposableIncome / a.monthlyIncome;\\n  let capacityScore = capacityRatio * 150;\\n  if (capacityScore > 100) capacityScore = 100;\\n  if (capacityScore < 0) capacityScore = 0;\\n  return {\\n    ...a,\\n    disposableIncome: Math.round(disposableIncome),\\n    capacityScore: Math.round(capacityScore * 100) / 100,\\n  };\\n});\\nreturn { capacityProfiles };\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 2 of 15.\n\nCell 95afd5ff-4bdd-4d01-b76c-86a312f526f2 updated successfully."
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"finish\", \"reason\": \"Fixed the capacity score calculation in cell 95afd5ff-4bdd-4d01-b76c-86a312f526f2 by correcting the clamp condition from 'if (capacityScore < 100)' to 'if (capacityScore > 100)', which prevents incorrectly inflating all capacity scores to 100 and now yields the expected loss provision of 2696.18.\"}\n```"
+    }
+  ]
+}

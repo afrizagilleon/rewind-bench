@@ -1,0 +1,50 @@
+{
+  "arm": "monolithic",
+  "mutationId": "21826f8c-4674-4fda-99c4-0593da2f5d7f:comparison-flip:0",
+  "stratum": "value-level",
+  "distanceToTerminal": 3,
+  "distBand": "short",
+  "hopDistance": 4,
+  "hopBand": "mid",
+  "notebookId": "5177d40e-0eda-4f4d-81c2-48b260c5feda",
+  "notebookName": "rb-designed-task-scheduling",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "turns": 2,
+  "stopReason": "finished",
+  "resolved": true,
+  "luckyPass": false,
+  "offTargetFix": false,
+  "heldOutHash": "97ea89e0d8fe8e5b276a9173a9a976ec9f87dd1f9c7e4bd8ee41d5dfbd1afc34",
+  "editedCells": [
+    "21826f8c-4674-4fda-99c4-0593da2f5d7f"
+  ],
+  "wallMs": 42543,
+  "tokens": {
+    "promptTokens": 3790,
+    "reasoningTokens": 4112,
+    "answerTokens": 1449,
+    "totalTokens": 9351
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an automated code repair agent for zaatool reactive notebooks.\nA notebook previously produced correct outputs but now fails or produces incorrect final outputs.\nYou are given the symptom (expected vs actual final output) and the entire notebook source.\nYou must trace the dataflow, locate the faulty cell, repair it using the notebook_edit_cell action, and call finish.\nNote: notebook_run_cell is DISABLED in monolithic mode.\n\nRespond ONLY with a fenced JSON code block:\n```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"<cell_id>\", \"code\": \"<repaired_code>\"}\n```\nor\n```json\n{\"action\": \"finish\", \"reason\": \"<description_of_fix>\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 1 of 15.\n\nNotebook: \"rb-designed-task-scheduling\" (5177d40e-0eda-4f4d-81c2-48b260c5feda)\n\n=== SYMPTOM ===\nExpected notebook final output (from terminal cell before the bug):\n```json\n{\n  \"taskCount\": 9,\n  \"schedulingViable\": true,\n  \"criticalTaskCount\": 5,\n  \"nominalMakespanHours\": 31,\n  \"pipelineEfficiencyPct\": 141.9,\n  \"totalBufferHoursAllocated\": 8\n}\n```\n\nActual notebook final output (current faulty state):\nStatus: success\nOutput:\n```json\n{\n  \"taskCount\": 9,\n  \"schedulingViable\": true,\n  \"criticalTaskCount\": 4,\n  \"nominalMakespanHours\": 30,\n  \"pipelineEfficiencyPct\": 146.7,\n  \"totalBufferHoursAllocated\": 4\n}\n```\n\n=== NOTEBOOK SOURCE CELLS ===\n--- Cell ID: 73ef1c03-982e-4f66-a403-0934ea7da3d8 ---\n```javascript\nconst tasks = [\n  { id: 'T1', duration: 4, deps: [], priority: 1, ramMb: 512 },\n  { id: 'T2', duration: 6, deps: ['T1'], priority: 2, ramMb: 1024 },\n  { id: 'T3', duration: 3, deps: ['T1'], priority: 1, ramMb: 256 },\n  { id: 'T4', duration: 8, deps: ['T2'], priority: 3, ramMb: 2048 },\n  { id: 'T5', duration: 5, deps: ['T2', 'T3'], priority: 2, ramMb: 512 },\n  { id: 'T6', duration: 2, deps: ['T3'], priority: 1, ramMb: 256 },\n  { id: 'T7', duration: 7, deps: ['T4'], priority: 3, ramMb: 1024 },\n  { id: 'T8', duration: 4, deps: ['T5', 'T6'], priority: 2, ramMb: 512 },\n  { id: 'T9', duration: 5, deps: ['T7', 'T8'], priority: 3, ramMb: 1024 },\n];\nreturn { tasks };\n```\n\n--- Cell ID: e14bb486-c441-45eb-814d-3ad857e8b428 ---\n```javascript\nconst tasks = inputs.tasks;\nconst sorted = [...tasks].sort((a, b) => a.deps.length - b.deps.length || a.id.localeCompare(b.id));\nreturn { sortedTasks: sorted };\n```\n\n--- Cell ID: 57e7153f-d269-41d2-8e92-981c11044e70 ---\n```javascript\nconst tasks = inputs.sortedTasks;\nconst finishTimes = {};\nconst forward = tasks.map((t) => {\n  let estStart = 0;\n  for (const d of t.deps) {\n    if (finishTimes[d] && finishTimes[d] > estStart) {\n      estStart = finishTimes[d];\n    }\n  }\n  const estFinish = estStart + t.duration;\n  finishTimes[t.id] = estFinish;\n  return {\n    ...t,\n    estStart,\n    estFinish,\n  };\n});\nreturn { forwardSchedule: forward };\n```\n\n--- Cell ID: b866ae21-9607-46e5-81c9-1a30ca1a0950 ---\n```javascript\nconst forward = inputs.forwardSchedule;\nconst maxSpan = Math.max(...forward.map((t) => t.estFinish));\nconst latestStartMap = {};\n\nfor (let i = forward.length - 1; i >= 0; i--) {\n  const t = forward[i];\n  const dependents = forward.filter((f) => f.deps.includes(t.id));\n  let lstFinish = maxSpan;\n  if (dependents.length > 0) {\n    lstFinish = Math.min(...dependents.map((d) => latestStartMap[d.id] ?? maxSpan));\n  }\n  const lstStart = lstFinish - t.duration;\n  latestStartMap[t.id] = lstStart;\n}\n\nconst bounded = forward.map((t) => ({\n  ...t,\n  lstStart: latestStartMap[t.id],\n  slack: latestStartMap[t.id] - t.estStart,\n}));\nreturn { boundedSchedule: bounded };\n```\n\n--- Cell ID: 21826f8c-4674-4fda-99c4-0593da2f5d7f ---\n```javascript\nconst bounded = inputs.boundedSchedule;\nconst critical = bounded.map((t) => ({\n  id: t.id,\n  duration: t.duration,\n  priority: t.priority,\n  ramMb: t.ramMb,\n  isCritical: t.slack !== 0,\n  estStart: t.estStart,\n  estFinish: t.estFinish,\n}));\nreturn { criticalSchedule: critical };\n```\n\n--- Cell ID: bd2a5089-36a6-4f94-87e9-48b22331ebd1 ---\n```javascript\nconst critical = inputs.criticalSchedule;\nconst allocated = critical.map((t) => {\n  let workerSlot = 1;\n  if (t.isCritical && t.priority >= 3) {\n    workerSlot = 3;\n  } else if (t.ramMb > 1024) {\n    workerSlot = 2;\n  }\n  return {\n    ...t,\n    workerSlot,\n  };\n});\nreturn { allocatedSchedule: allocated };\n```\n\n--- Cell ID: 751a9221-eaae-4e98-b4b0-be495e63b71d ---\n```javascript\nconst allocated = inputs.allocatedSchedule;\nconst buffered = allocated.map((t) => {\n  let bufferHours = 0;\n  if (t.isCritical) {\n    bufferHours = Math.ceil(t.duration * 0.20);\n  }\n  return {\n    ...t,\n    bufferedDuration: t.duration + bufferHours,\n    bufferHours,\n  };\n});\nreturn { bufferedSchedule: buffered };\n```\n\n--- Cell ID: 05e8c39f-854b-4f18-8c87-5d6105fb4555 ---\n```javascript\nconst tasks = inputs.bufferedSchedule;\nlet totalWorkHours = 0;\nlet totalBuffer = 0;\nlet criticalCount = 0;\nlet maxFinish = 0;\n\nfor (const t of tasks) {\n  totalWorkHours += t.duration;\n  totalBuffer += t.bufferHours;\n  if (t.isCritical) criticalCount++;\n  const adjustedFinish = t.estFinish + t.bufferHours;\n  if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\n}\n\nconst efficiency = Math.round((totalWorkHours / (maxFinish || 1)) * 1000) / 10;\n\nreturn {\n  taskCount: tasks.length,\n  criticalTaskCount: criticalCount,\n  nominalMakespanHours: maxFinish,\n  totalBufferHoursAllocated: totalBuffer,\n  pipelineEfficiencyPct: efficiency,\n  schedulingViable: maxFinish <= 60 && criticalCount >= 2,\n};\n```\n\nLocate the bug causing the final output discrepancy, fix it using notebook_edit_cell, and finish."
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"21826f8c-4674-4fda-99c4-0593da2f5d7f\", \"code\": \"const bounded = inputs.boundedSchedule;\\nconst critical = bounded.map((t) => ({\\n  id: t.id,\\n  duration: t.duration,\\n  priority: t.priority,\\n  ramMb: t.ramMb,\\n  isCritical: t.slack === 0,\\n  estStart: t.estStart,\\n  estFinish: t.estFinish,\\n}));\\nreturn { criticalSchedule: critical };\\n\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 2 of 15.\n\nCell 21826f8c-4674-4fda-99c4-0593da2f5d7f updated successfully."
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"finish\", \"reason\": \"Fixed critical detection to use slack === 0 instead of slack !== 0, which correctly identifies 5 critical tasks, allocates 8 buffer hours, and yields the expected makespan and efficiency.\"}\n```"
+    }
+  ]
+}
