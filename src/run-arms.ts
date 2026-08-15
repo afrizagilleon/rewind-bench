@@ -1,19 +1,23 @@
 /**
- * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1 & R9 & R10)
+ * CLI Runner for Arms A/B/C (R6, R6.1, R5.1, R9, R10 & R10.1)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
- * Supports incidental corpus (results/mutations.jsonl) and designed corpus (--designed, results/mutations-designed.jsonl).
+ * Supports incidental corpus (results/mutations.jsonl -> results/arms.jsonl)
+ * and designed corpus (--designed, results/mutations-designed.jsonl -> results/arms-designed.jsonl).
+ *
  * Supplies terminal cell symptom (final expected vs actual output) and all cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
- * Saves transcripts to results/transcripts/<arm>-<mutationId>.json and appends records to results/arms.jsonl.
- * Reports summary stratified across hopBands (near, mid, far) and strata (overall, name-level, value-level).
+ * Saves transcripts to results/transcripts/<arm>-<mutationId>.json.
+ *
+ * Primary report axis: distBand (direct [0], short [1-3], long [4+])
+ * Secondary report axes: hopBand (near, mid, far) and stratum (value-level, name-level).
  *
  * Usage:
- *   npm run arms -- --smoke --designed --hop=far   # 3 far-hop mutations from 3 distinct designed notebooks
- *   npm run arms -- --smoke --hop=far             # 3 far-hop mutations from incidental corpus
- *   npm run arms -- --smoke                       # 3 mutations × 3 arms
- *   npm run arms -- --limit=50                    # full benchmark run
- *   npm run arms -- --cleanup                     # remove any orphan zz-rewind-arm-*
+ *   npm run arms -- --smoke --designed --dist=long   # 3 mutations dist>=4, 3 distinct notebooks, 3 distinct operators
+ *   npm run arms -- --smoke --designed --hop=far
+ *   npm run arms -- --smoke
+ *   npm run arms -- --designed                       # full benchmark on designed corpus
+ *   npm run arms -- --cleanup                        # remove any orphan zz-rewind-arm-*
  */
 
 import { listNotebooks, getNotebook, runNotebook, requireEnv } from "./client";
@@ -21,7 +25,15 @@ import { runMonolithicArm } from "./arms/monolithic";
 import { runStepwiseArm } from "./arms/stepwise";
 import { runRewindArm } from "./arms/rewind";
 import type { ArmResult, ArmContext } from "./arms/types";
-import { stratumForKind, hopBandForDistance, type Mutation, type Stratum, type HopBand } from "./mutate";
+import {
+  stratumForKind,
+  hopBandForDistance,
+  distBandForDistance,
+  type Mutation,
+  type Stratum,
+  type HopBand,
+  type DistBand,
+} from "./mutate";
 import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -206,6 +218,8 @@ function saveTranscript(transcriptsDir: string, arm: string, mutation: Mutation,
     arm: armResult.arm,
     mutationId: armResult.mutationId,
     stratum: armResult.stratum,
+    distanceToTerminal: armResult.distanceToTerminal,
+    distBand: armResult.distBand,
     hopDistance: armResult.hopDistance,
     hopBand: armResult.hopBand,
     notebookId: mutation.notebookId,
@@ -244,6 +258,12 @@ function loadMutations(mutationsPath: string): Mutation[] {
       }
       if (!m.hopBand) {
         m.hopBand = hopBandForDistance(m.hopDistance);
+      }
+      if (m.distanceToTerminal === undefined) {
+        m.distanceToTerminal = 0;
+      }
+      if (!m.distBand) {
+        m.distBand = distBandForDistance(m.distanceToTerminal);
       }
       mutations.push(m);
     } catch {
@@ -326,6 +346,7 @@ async function main() {
   let targetArm: "monolithic" | "stepwise" | "rewind" | null = null;
   let targetStratum: Stratum | null = null;
   let targetHop: HopBand | null = null;
+  let targetDist: DistBand | null = null;
 
   for (const arg of args) {
     if (arg.startsWith("--limit=")) {
@@ -340,13 +361,18 @@ async function main() {
     if (arg.startsWith("--hop=")) {
       targetHop = arg.split("=")[1] as HopBand;
     }
+    if (arg.startsWith("--dist=")) {
+      targetDist = arg.split("=")[1] as DistBand;
+    }
   }
 
   const resultsDir = process.env.RESULTS_DIR || "./results";
   const mutationsPath = isDesigned
     ? join(resultsDir, "mutations-designed.jsonl")
     : join(resultsDir, "mutations.jsonl");
-  const armsPath = join(resultsDir, "arms.jsonl");
+  const armsPath = isDesigned
+    ? join(resultsDir, "arms-designed.jsonl")
+    : join(resultsDir, "arms.jsonl");
   const transcriptsDir = join(resultsDir, "transcripts");
 
   mkdirSync(resultsDir, { recursive: true });
@@ -361,10 +387,13 @@ async function main() {
   let selectedMutations: Mutation[] = [];
 
   if (isSmoke) {
-    // Filter candidates matching specified target criteria
+    // Filter candidates matching target criteria
     let candidates = mutations;
+    if (targetDist) {
+      candidates = candidates.filter((m) => m.distBand === targetDist || (targetDist === "long" && (m.distanceToTerminal ?? 0) >= 4));
+    }
     if (targetHop) {
-      candidates = candidates.filter((m) => m.hopBand === targetHop || (targetHop === "far" && m.hopDistance && m.hopDistance >= 7));
+      candidates = candidates.filter((m) => m.hopBand === targetHop);
     }
     if (targetStratum) {
       candidates = candidates.filter((m) => m.stratum === targetStratum);
@@ -372,25 +401,42 @@ async function main() {
 
     const seenNotebooks = new Set<string>();
     const seenCells = new Set<string>();
+    const seenOperators = new Set<string>();
 
+    // Pass 1: Try to pick 3 distinct notebooks, distinct cells, and distinct operators
     for (const m of candidates) {
-      if (!seenNotebooks.has(m.notebookId) && !seenCells.has(m.cellId)) {
+      if (!seenNotebooks.has(m.notebookId) && !seenCells.has(m.cellId) && !seenOperators.has(m.kind)) {
         seenNotebooks.add(m.notebookId);
         seenCells.add(m.cellId);
+        seenOperators.add(m.kind);
         selectedMutations.push(m);
         if (selectedMutations.length >= 3) break;
       }
     }
 
-    // Strict R10 requirement: must have 3 distinct notebooks, fail if insufficient
+    // Pass 2: If we couldn't get 3 distinct operators, allow distinct notebooks & cells
+    if (selectedMutations.length < 3) {
+      for (const m of candidates) {
+        if (!seenNotebooks.has(m.notebookId) && !seenCells.has(m.cellId)) {
+          seenNotebooks.add(m.notebookId);
+          seenCells.add(m.cellId);
+          seenOperators.add(m.kind);
+          selectedMutations.push(m);
+          if (selectedMutations.length >= 3) break;
+        }
+      }
+    }
+
+    // Strict R10.1 requirement: must have 3 distinct notebooks, fail if insufficient
     if (selectedMutations.length < 3) {
       const distinctAvailable = new Set(candidates.map((c) => c.notebookId)).size;
       throw new Error(
-        `Smoke run sampling failure: required 3 distinct notebooks for criteria (hop=${targetHop || "any"}, stratum=${targetStratum || "any"}), but only ${distinctAvailable} distinct notebook(s) are available in ${mutationsPath}.`
+        `Smoke run sampling failure: required 3 distinct notebooks for criteria (dist=${targetDist || "any"}, hop=${targetHop || "any"}, stratum=${targetStratum || "any"}), but only ${distinctAvailable} distinct notebook(s) are available in ${mutationsPath}.`
       );
     }
   } else {
     let filtered = mutations;
+    if (targetDist) filtered = filtered.filter((m) => m.distBand === targetDist);
     if (targetHop) filtered = filtered.filter((m) => m.hopBand === targetHop);
     if (targetStratum) filtered = filtered.filter((m) => m.stratum === targetStratum);
     selectedMutations = filtered.slice(0, limit);
@@ -407,15 +453,18 @@ async function main() {
   console.log("=======================================================");
   console.log(
     isDesigned
-      ? "R10 — ARMS (A/B/C) EVALUATION ON DESIGNED CORPUS"
+      ? "R10.1 — ARMS (A/B/C) EVALUATION ON DESIGNED CORPUS"
       : "R9 — ARMS (A/B/C) EVALUATION BENCHMARK"
   );
   console.log("=======================================================");
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
   console.log(`Corpus:          ${isDesigned ? "DESIGNED (results/mutations-designed.jsonl)" : "INCIDENTAL (results/mutations.jsonl)"}`);
   console.log(`Target mutants:  ${selectedMutations.length}`);
+  if (targetDist) {
+    console.log(`Target distBand: ${targetDist}`);
+  }
   if (targetHop) {
-    console.log(`Target hop band: ${targetHop}`);
+    console.log(`Target hopBand:  ${targetHop}`);
   }
   if (targetStratum) {
     console.log(`Target stratum:  ${targetStratum}`);
@@ -437,9 +486,11 @@ async function main() {
     const stratum = mutation.stratum || stratumForKind(mutation.kind);
     const hopDistance = mutation.hopDistance ?? 1;
     const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+    const distanceToTerminal = mutation.distanceToTerminal ?? 0;
+    const distBand = mutation.distBand ?? distBandForDistance(distanceToTerminal);
 
     console.log(`\n[Mutation ${mIdx + 1}/${selectedMutations.length}] ${mutation.id} (${mutation.notebookName})`);
-    console.log(`  Kind: ${mutation.kind} [${stratum}] | Hop: ${hopDistance} (${hopBand}) | Bug: ${mutation.description}`);
+    console.log(`  Kind: ${mutation.kind} [${stratum}] | Dist to terminal: ${distanceToTerminal} (${distBand}) | Hop: ${hopDistance} (${hopBand}) | Bug: ${mutation.description}`);
 
     if (!notebookCache[mutation.notebookId]) {
       try {
@@ -538,16 +589,24 @@ async function main() {
   console.log("\n" + "=".repeat(65));
   console.log(
     isDesigned
-      ? "R10 BENCHMARK SUMMARY REPORT (Designed Heterogeneous Corpus)"
+      ? "R10.1 BENCHMARK SUMMARY REPORT (Designed Heterogeneous Corpus)"
       : "R9 BENCHMARK SUMMARY REPORT"
   );
   console.log("=".repeat(65));
 
   printSummaryBlock("OVERALL RESULTS", results, armsToRun);
 
-  // Breakdown by Hop Band
+  // Breakdown by Distance Band (Primary Localization Difficulty Axis)
   console.log("\n" + "#".repeat(65));
-  console.log("HOP BAND STRATIFICATION (Localization Difficulty)");
+  console.log("DISTANCE-TO-TERMINAL STRATIFICATION (Primary Difficulty Axis)");
+  console.log("#".repeat(65));
+  printSummaryBlock("DIST BAND: LONG   (Distance >= 4)", results.filter((r) => r.distBand === "long"), armsToRun);
+  printSummaryBlock("DIST BAND: SHORT  (Distance 1-3)",  results.filter((r) => r.distBand === "short"), armsToRun);
+  printSummaryBlock("DIST BAND: DIRECT (Distance 0)",    results.filter((r) => r.distBand === "direct"), armsToRun);
+
+  // Breakdown by Hop Band (DAG Depth Axis)
+  console.log("\n" + "#".repeat(65));
+  console.log("HOP BAND STRATIFICATION (DAG Depth Axis)");
   console.log("#".repeat(65));
   printSummaryBlock("HOP BAND: NEAR (Hop 1-2)", results.filter((r) => r.hopBand === "near"), armsToRun);
   printSummaryBlock("HOP BAND: MID  (Hop 3-6)", results.filter((r) => r.hopBand === "mid"), armsToRun);

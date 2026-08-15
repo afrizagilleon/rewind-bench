@@ -1,13 +1,18 @@
 /**
- * CLI Runner for Mutation Engine (R9 & R10 Ground Truth)
+ * CLI Runner for Mutation Engine (R9, R10 & R10.1 Ground Truth)
  *
  * Generates and validates synthetic bugs against deterministic cells with upstream dependencies.
+ * Computes both hopDistance/hopBand and distanceToTerminal/distBand ("direct" | "short" | "long").
+ *
  * When run with --designed:
- * - Operates ONLY on rb-designed-* benchmark notebooks
+ * - Operates ONLY on rb-designed-* benchmark notebooks (varied chain lengths: 6, 7, 7, 8, 8, 9, with UUID cell IDs)
  * - Outputs to results/mutations-designed.jsonl (separate file)
  * - Enforces max 5 mutations per notebook
- * - Enforces >= 5 distinct notebooks represented per hopBand (near, mid, far)
- * - If constraint cannot be met: reports conflict and stops
+ * - Enforces composition:
+ *     long   (distance >= 4): >= 10 mutations, >= 5 notebooks, >= 3 distinct mutation operators
+ *     short  (distance 1-3):  >= 10 mutations, >= 5 notebooks
+ *     direct (distance 0):    >= 5 mutations (control group)
+ * - If any constraint cannot be met: reports conflict and stops.
  *
  * Usage:
  *   npm run mutate -- --designed
@@ -23,10 +28,12 @@ import {
   loadDeterministicCells,
   computeHopDistances,
   stratumForKind,
+  distBandForDistance,
   type Mutation,
   type MutationKind,
   type Stratum,
   type HopBand,
+  type DistBand,
 } from "./mutate";
 import { hashValue } from "./ledger";
 import { join } from "node:path";
@@ -212,6 +219,7 @@ async function main() {
   let limit = 50;
   let maxPerNotebook = isDesigned ? 5 : 3;
   let allowedKinds: Set<MutationKind> | null = null;
+  let targetDistBand: DistBand | null = null;
   const isFresh = args.includes("--fresh") || isDesigned;
 
   for (const arg of args) {
@@ -220,6 +228,9 @@ async function main() {
     }
     if (arg.startsWith("--max-per-nb=")) {
       maxPerNotebook = parseInt(arg.split("=")[1], 10);
+    }
+    if (arg.startsWith("--dist=")) {
+      targetDistBand = arg.split("=")[1] as DistBand;
     }
     if (arg.startsWith("--kinds=")) {
       const kinds = arg
@@ -255,7 +266,7 @@ async function main() {
   console.log("=======================================================");
   console.log(
     isDesigned
-      ? "R10 — MUTATION ENGINE (Designed Heterogeneous Corpus)"
+      ? "R10.1 — MUTATION ENGINE (Designed Corpus with distBand Axis)"
       : "R9 — MUTATION ENGINE (Hop-Calibrated Ground Truth)"
   );
   console.log("=======================================================");
@@ -263,6 +274,9 @@ async function main() {
   console.log(`Target verified limit: ${limit}`);
   console.log(`Max per notebook:      ${maxPerNotebook}`);
   console.log(`Eligibility rule:      readsFromUpstream === true (AST verified)`);
+  if (targetDistBand) {
+    console.log(`Filter distBand:       ${targetDistBand}`);
+  }
   if (allowedKinds) {
     console.log(`Allowed kinds:         ${Array.from(allowedKinds).join(", ")}`);
   }
@@ -285,11 +299,20 @@ async function main() {
 
   let totalCandidatesGenerated = 0;
   let totalValidatedMutations = 0;
-  let totalNear = 0;
-  let totalMid = 0;
-  let totalFar = 0;
   let totalNameLevel = 0;
   let totalValueLevel = 0;
+
+  const distStats: Record<DistBand, { count: number; notebooks: Set<string>; operators: Set<MutationKind> }> = {
+    long: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
+    short: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
+    direct: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
+  };
+
+  const hopStats: Record<HopBand, { count: number; notebooks: Set<string> }> = {
+    near: { count: 0, notebooks: new Set<string>() },
+    mid: { count: 0, notebooks: new Set<string>() },
+    far: { count: 0, notebooks: new Set<string>() },
+  };
 
   const kindStats: Record<MutationKind, { generated: number; validated: number }> = {
     "key-rename": { generated: 0, validated: 0 },
@@ -305,11 +328,6 @@ async function main() {
   };
 
   const validatedByNotebook: Record<string, number> = {};
-  const notebooksPerBand: Record<HopBand, Set<string>> = {
-    near: new Set<string>(),
-    mid: new Set<string>(),
-    far: new Set<string>(),
-  };
 
   // Load deterministic cells if not designed
   const deterministicCells = isDesigned ? new Set<string>() : loadDeterministicCells(determinismPath);
@@ -325,18 +343,31 @@ async function main() {
 
     const hopMap = computeHopDistances(originalDoc.steps);
     const execCells = getExecutableCells(originalDoc.steps);
+    const terminalIdx = execCells.length - 1;
 
     // Filter eligible cells: must read from upstream
-    const eligibleCells = execCells.filter((c) => {
-      const hopInfo = hopMap.get(c.id);
-      if (!hopInfo || !hopInfo.readsFromUpstream || hopInfo.hopDistance < 1) return false;
-      if (isDesigned) return true; // Designed notebooks were pre-verified 10x deterministic
-      return deterministicCells.has(`${nb.id}:${c.id}`);
-    });
+    const eligibleCellsWithMeta = execCells
+      .map((c, cIdx) => {
+        const hopInfo = hopMap.get(c.id);
+        const distanceToTerminal = terminalIdx - cIdx;
+        const distBand = distBandForDistance(distanceToTerminal);
+        return {
+          ...c,
+          cIdx,
+          distanceToTerminal,
+          distBand,
+          hopInfo,
+        };
+      })
+      .filter((c) => {
+        if (!c.hopInfo || !c.hopInfo.readsFromUpstream || c.hopInfo.hopDistance < 1) return false;
+        if (isDesigned) return true;
+        return deterministicCells.has(`${nb.id}:${c.id}`);
+      });
 
-    if (eligibleCells.length === 0) continue;
+    if (eligibleCellsWithMeta.length === 0) continue;
 
-    console.log(`\n[${idx + 1}/${notebooks.length}] Notebook: ${nb.name} (${eligibleCells.length} eligible upstream-reading cell(s))`);
+    console.log(`\n[${idx + 1}/${notebooks.length}] Notebook: ${nb.name} (${eligibleCellsWithMeta.length} eligible upstream-reading cell(s))`);
 
     let nbValidatedCount = 0;
     let scratchDoc: any = null;
@@ -345,19 +376,21 @@ async function main() {
 
     const isDeepPipeline = !isDesigned && nb.name === "zz-uji-20-cell";
     const nbCap = isDeepPipeline ? 22 : maxPerNotebook;
-    const maxPerCell = 1; // 1 mutation per cell ensures spread across near/mid/far
+    const maxPerCell = 1;
 
-    let orderedCells = eligibleCells;
+    let orderedCells = eligibleCellsWithMeta;
     if (isDesigned) {
-      const nearCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "near");
-      const midCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "mid");
-      const farCells = eligibleCells.filter((c) => hopMap.get(c.id)?.hopBand === "far");
+      // Balanced distribution: 2 long (distance >= 4), 2 short (distance 1-3), 1 direct (distance 0)
+      const longCells = eligibleCellsWithMeta.filter((c) => c.distBand === "long");
+      const shortCells = eligibleCellsWithMeta.filter((c) => c.distBand === "short");
+      const directCells = eligibleCellsWithMeta.filter((c) => c.distBand === "direct");
+
       orderedCells = [
-        ...farCells.slice(0, 1),
-        ...nearCells.slice(0, 2),
-        ...midCells.slice(0, 2),
-        ...farCells.slice(1),
-        ...midCells.slice(2),
+        ...longCells.slice(0, 2),
+        ...shortCells.slice(0, 2),
+        ...directCells.slice(0, 1),
+        ...longCells.slice(2),
+        ...shortCells.slice(2),
       ];
     }
 
@@ -377,7 +410,7 @@ async function main() {
       for (const cell of orderedCells) {
         if (nbValidatedCount >= nbCap) break;
 
-        const hopInfo = hopMap.get(cell.id)!;
+        const hopInfo = cell.hopInfo!;
         const baselineResult = baselineRun.cell_results?.[cell.id];
         if (!baselineResult || baselineResult.error || baselineResult.output === undefined) {
           continue;
@@ -387,10 +420,19 @@ async function main() {
         const baselineHash = hashValue(baselineResult.output);
 
         const rawCandidates = mutationsFor(nb.id, nb.name, cell.id, cell.code);
+        // Rotate operator priority across cells and notebooks to ensure rich operator diversity
+        const operatorCycles: MutationKind[][] = [
+          ["const-perturb", "filter-invert", "operand-swap", "arith-swap", "comparison-flip", "index-shift", "off-by-one"],
+          ["arith-swap", "index-shift", "comparison-flip", "const-perturb", "operand-swap", "filter-invert", "off-by-one"],
+          ["comparison-flip", "operand-swap", "filter-invert", "const-perturb", "arith-swap", "index-shift", "off-by-one"],
+          ["index-shift", "const-perturb", "arith-swap", "filter-invert", "comparison-flip", "operand-swap", "off-by-one"],
+          ["operand-swap", "arith-swap", "comparison-flip", "const-perturb", "filter-invert", "index-shift", "off-by-one"],
+        ];
+        const cycle = operatorCycles[(cell.cIdx + idx) % operatorCycles.length];
         const sortedCandidates = rawCandidates.sort((a, b) => {
-          if (a.kind === "key-rename" && b.kind !== "key-rename") return 1;
-          if (a.kind !== "key-rename" && b.kind === "key-rename") return -1;
-          return 0;
+          const prioA = cycle.indexOf(a.kind);
+          const prioB = cycle.indexOf(b.kind);
+          return (prioA === -1 ? 99 : prioA) - (prioB === -1 ? 99 : prioB);
         });
 
         const candidates = allowedKinds
@@ -448,6 +490,8 @@ async function main() {
                 stratum,
                 hopDistance: hopInfo.hopDistance,
                 hopBand: hopInfo.hopBand,
+                distanceToTerminal: cell.distanceToTerminal,
+                distBand: cell.distBand,
                 baselineHash,
                 mutantHash,
                 mutantErrored,
@@ -461,20 +505,22 @@ async function main() {
               if (stratum === "name-level") totalNameLevel++;
               else totalValueLevel++;
 
-              if (hopInfo.hopBand === "near") totalNear++;
-              else if (hopInfo.hopBand === "mid") totalMid++;
-              else totalFar++;
+              distStats[cell.distBand].count++;
+              distStats[cell.distBand].notebooks.add(nb.name);
+              distStats[cell.distBand].operators.add(candidate.kind);
+
+              hopStats[hopInfo.hopBand].count++;
+              hopStats[hopInfo.hopBand].notebooks.add(nb.name);
 
               validatedByNotebook[nb.name] = (validatedByNotebook[nb.name] || 0) + 1;
-              notebooksPerBand[hopInfo.hopBand].add(nb.name);
 
               const errNote = mutantErrored ? " [crashed]" : "";
               console.log(
-                `  ✓ [${candidate.kind} | ${stratum} | hop ${hopInfo.hopDistance} (${hopInfo.hopBand})] ${cell.id}: ${candidate.description}${errNote}`
+                `  ✓ [${candidate.kind} | ${stratum} | dist ${cell.distanceToTerminal} (${cell.distBand}) | hop ${hopInfo.hopDistance} (${hopInfo.hopBand})] ${cell.id.slice(0, 8)}...: ${candidate.description}${errNote}`
               );
             } else {
               console.log(
-                `  ✗ Discarded [${candidate.kind}] on ${cell.id}: output hash unchanged`
+                `  ✗ Discarded [${candidate.kind}] on ${cell.id.slice(0, 8)}...: output hash unchanged`
               );
             }
           } catch (execErr) {
@@ -498,24 +544,38 @@ async function main() {
       : "0";
   const distinctNotebooksCount = Object.keys(validatedByNotebook).length;
 
-  console.log("\n" + "=".repeat(60));
+  console.log("\n" + "=".repeat(65));
   console.log(
     isDesigned
-      ? "MUTATION ENGINE SUMMARY (R10 Designed Corpus)"
+      ? "MUTATION ENGINE SUMMARY (R10.1 Designed Corpus with distBand Axis)"
       : "MUTATION ENGINE SUMMARY (R9 Incidental Corpus)"
   );
-  console.log("=".repeat(60));
+  console.log("=".repeat(65));
   console.log(`Candidates generated (Layer 1 syntax): ${totalCandidatesGenerated}`);
   console.log(`Validated mutations (Layer 2 behavior): ${totalValidatedMutations}`);
   console.log(`Distinct notebooks:                    ${distinctNotebooksCount}`);
-  console.log(`\nHop Band Distribution & Notebook Representation:`);
-  console.log(`  - near (hop 1-2): ${String(totalNear).padStart(2)} mutations across ${notebooksPerBand.near.size} notebook(s) (target >= 5 notebooks)`);
-  console.log(`  - mid  (hop 3-6): ${String(totalMid).padStart(2)} mutations across ${notebooksPerBand.mid.size} notebook(s) (target >= 5 notebooks)`);
-  console.log(`  - far  (hop 7+):  ${String(totalFar).padStart(2)} mutations across ${notebooksPerBand.far.size} notebook(s) (target >= 5 notebooks)`);
+
+  console.log(`\nDISTANCE-TO-TERMINAL DISTRIBUTION (Primary Localization Difficulty Axis):`);
+  console.log(
+    `  - long   (distance >= 4): ${String(distStats.long.count).padStart(2)} mutations across ${distStats.long.notebooks.size} notebook(s), ${distStats.long.operators.size} operators [${Array.from(distStats.long.operators).join(", ")}]`
+  );
+  console.log(
+    `  - short  (distance 1-3):  ${String(distStats.short.count).padStart(2)} mutations across ${distStats.short.notebooks.size} notebook(s), ${distStats.short.operators.size} operators [${Array.from(distStats.short.operators).join(", ")}]`
+  );
+  console.log(
+    `  - direct (distance 0):    ${String(distStats.direct.count).padStart(2)} mutations across ${distStats.direct.notebooks.size} notebook(s), ${distStats.direct.operators.size} operators [${Array.from(distStats.direct.operators).join(", ")}]`
+  );
+
+  console.log(`\nHOP BAND DISTRIBUTION (DAG Depth Axis):`);
+  console.log(`  - near (hop 1-2): ${String(hopStats.near.count).padStart(2)} mutations across ${hopStats.near.notebooks.size} notebook(s)`);
+  console.log(`  - mid  (hop 3-6): ${String(hopStats.mid.count).padStart(2)} mutations across ${hopStats.mid.notebooks.size} notebook(s)`);
+  console.log(`  - far  (hop 7+):  ${String(hopStats.far.count).padStart(2)} mutations across ${hopStats.far.notebooks.size} notebook(s)`);
+
   console.log(`\nStratum Distribution:`);
   console.log(`  - Value-level stratum:               ${totalValueLevel}`);
   console.log(`  - Name-level stratum (control):      ${totalNameLevel}`);
   console.log(`Behavioral validation rate:            ${passRate}%`);
+
   console.log("\nBreakdown by Mutation Kind:");
   for (const [k, stats] of Object.entries(kindStats) as [MutationKind, { generated: number; validated: number }][]) {
     const rate = stats.generated > 0 ? ((stats.validated / stats.generated) * 100).toFixed(1) : "0";
@@ -524,32 +584,44 @@ async function main() {
       `  ${k.padEnd(16)} [${stratum.padEnd(11)}]: ${String(stats.validated).padStart(3)} / ${String(stats.generated).padStart(3)} validated (${rate}%)`
     );
   }
+
   console.log("\nBreakdown by Notebook:");
   for (const [nbName, count] of Object.entries(validatedByNotebook)) {
     console.log(`  - ${nbName}: ${count} mutation(s)`);
   }
-  console.log("=".repeat(60));
+  console.log("=".repeat(65));
 
-  // R10 Check: minimal 5 notebooks represented per band
+  // R10.1 Composition Check
   if (isDesigned) {
     const conflicts: string[] = [];
-    if (notebooksPerBand.near.size < 5) {
-      conflicts.push(`Near band (hop 1-2) only has ${notebooksPerBand.near.size} notebook(s) (required >= 5)`);
+    if (distStats.long.count < 10) {
+      conflicts.push(`long band (distance >= 4) has ${distStats.long.count} mutations (required >= 10)`);
     }
-    if (notebooksPerBand.mid.size < 5) {
-      conflicts.push(`Mid band (hop 3-6) only has ${notebooksPerBand.mid.size} notebook(s) (required >= 5)`);
+    if (distStats.long.notebooks.size < 5) {
+      conflicts.push(`long band (distance >= 4) only has ${distStats.long.notebooks.size} notebook(s) (required >= 5)`);
     }
-    if (notebooksPerBand.far.size < 5) {
-      conflicts.push(`Far band (hop 7+) only has ${notebooksPerBand.far.size} notebook(s) (required >= 5)`);
+    if (distStats.long.operators.size < 3) {
+      conflicts.push(`long band (distance >= 4) only has ${distStats.long.operators.size} operator(s) (required >= 3)`);
+    }
+
+    if (distStats.short.count < 10) {
+      conflicts.push(`short band (distance 1-3) has ${distStats.short.count} mutations (required >= 10)`);
+    }
+    if (distStats.short.notebooks.size < 5) {
+      conflicts.push(`short band (distance 1-3) only has ${distStats.short.notebooks.size} notebook(s) (required >= 5)`);
+    }
+
+    if (distStats.direct.count < 5) {
+      conflicts.push(`direct band (distance 0) has ${distStats.direct.count} mutations (required >= 5)`);
     }
 
     if (conflicts.length > 0) {
-      console.error("\n[R10 CONSTRAINT CONFLICT DETECTED]");
+      console.error("\n[R10.1 COMPOSITION CONFLICT DETECTED]");
       for (const c of conflicts) console.error(`  ✗ ${c}`);
-      console.error("Stopping execution as required by R10 contract.");
+      console.error("Stopping execution as required by R10.1 contract.");
       process.exit(1);
     } else {
-      console.log("\n✓ R10 Constraint satisfied: >= 5 distinct notebooks represented in each hop band (near, mid, far).");
+      console.log("\n✓ R10.1 Composition satisfied: long (>=10 mut, >=5 nb, >=3 op), short (>=10 mut, >=5 nb), direct (>=5 mut).");
     }
   }
 }

@@ -1,12 +1,13 @@
 /**
  * Script to generate, create via REST, verify 10x determinism, and dump
- * the 6 designed benchmark notebooks (R10).
+ * the 6 redesigned benchmark notebooks with randomUUID() cell IDs and varied lengths (6, 7, 7, 8, 8, 9) (R10.1).
  */
 
 import { listNotebooks, requireEnv } from "../src/client";
 import { hashValue } from "../src/ledger";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 function getBaseUrl(): string {
   const url = process.env.ZAA_BASE_URL?.trim() || "http://localhost:4000";
@@ -89,18 +90,19 @@ async function runNotebook(notebookId: string): Promise<any> {
 }
 
 // -------------------------------------------------------------
-// NOTEBOOK DEFINITIONS
+// NOTEBOOK DEFINITIONS (Varying lengths: 6, 7, 7, 8, 8, 9)
 // -------------------------------------------------------------
 
-export const DESIGNED_NOTEBOOKS = [
-  // 1. rb-designed-sales-aggregation (7 cells, chain depth 6)
-  {
-    name: "rb-designed-sales-aggregation",
-    steps: [
-      {
-        id: "sales-raw-tx",
-        kind: "cell",
-        code: `const transactions = [
+export function createDesignedNotebookDefinitions(): any[] {
+  return [
+    // 1. rb-designed-sales-aggregation (6 cells)
+    {
+      name: "rb-designed-sales-aggregation",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const transactions = [
   { id: 'T101', sku: 'LAPTOP-PRO', category: 'Electronics', qty: 2, unitPrice: 1200, discountPct: 10, region: 'Jakarta', customerTier: 'Platinum' },
   { id: 'T102', sku: 'DESK-STAND', category: 'Furniture', qty: 4, unitPrice: 150, discountPct: 5, region: 'Surabaya', customerTier: 'Gold' },
   { id: 'T103', sku: 'MECH-KEYBOARD', category: 'Electronics', qty: 3, unitPrice: 180, discountPct: 0, region: 'Bandung', customerTier: 'Silver' },
@@ -115,11 +117,11 @@ export const DESIGNED_NOTEBOOKS = [
   { id: 'T112', sku: 'MOUSE-WIRELESS', category: 'Electronics', qty: 5, unitPrice: 45, discountPct: 0, region: 'Surabaya', customerTier: 'Platinum' },
 ];
 return { transactions };`,
-      },
-      {
-        id: "sales-compute-gross",
-        kind: "cell",
-        code: `const lineItems = inputs.transactions.map((tx) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const lineItems = inputs.transactions.map((tx) => {
   const baseGross = tx.qty * tx.unitPrice;
   const discountAmount = baseGross * (tx.discountPct / 100);
   const netGross = baseGross - discountAmount;
@@ -133,11 +135,11 @@ return { transactions };`,
   };
 });
 return { lineItems };`,
-      },
-      {
-        id: "sales-regional-tax",
-        kind: "cell",
-        code: `const TAX_RATES = {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const TAX_RATES = {
   Jakarta: 0.11,
   Surabaya: 0.10,
   Bandung: 0.10,
@@ -154,11 +156,11 @@ const taxedItems = inputs.lineItems.map((item) => {
   };
 });
 return { taxedItems };`,
-      },
-      {
-        id: "sales-tier-rebate",
-        kind: "cell",
-        code: `const rebatedItems = inputs.taxedItems.map((item) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const rebatedItems = inputs.taxedItems.map((item) => {
   let rebateRate = 0;
   if (item.customerTier === 'Platinum' && item.netGross > 400) {
     rebateRate = 0.05;
@@ -174,11 +176,11 @@ return { taxedItems };`,
   };
 });
 return { rebatedItems };`,
-      },
-      {
-        id: "sales-commissions",
-        kind: "cell",
-        code: `const COMMISSION_RATES = {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const COMMISSION_RATES = {
   Electronics: 0.03,
   Furniture: 0.05,
   Books: 0.02,
@@ -187,51 +189,26 @@ return { rebatedItems };`,
 const commissionedItems = inputs.rebatedItems.map((item) => {
   const rate = COMMISSION_RATES[item.category] || 0.025;
   const comm = item.netGross * rate;
-  return {
-    ...item,
-    commissionAmount: Math.round(comm * 100) / 100,
-  };
-});
-return { commissionedItems };`,
-      },
-      {
-        id: "sales-channel-surcharge",
-        kind: "cell",
-        code: `const allocatedItems = inputs.commissionedItems.map((item) => {
   const fulfillment = item.region === 'Jakarta' || item.region === 'Surabaya' ? 'DirectHub' : 'RegionalWarehouse';
   const surcharge = fulfillment === 'RegionalWarehouse' ? 18.5 : 8.0;
   return {
     ...item,
+    commissionAmount: Math.round(comm * 100) / 100,
     fulfillment,
     logisticsSurcharge: surcharge,
   };
 });
-return { allocatedItems };`,
-      },
-      {
-        id: "sales-loyalty-settlement",
-        kind: "cell",
-        code: `const settledAllocations = inputs.allocatedItems.map((item) => {
-  const points = item.customerTier === 'Platinum' ? 50 : item.customerTier === 'Gold' ? 25 : 10;
-  const cashback = points * 0.5;
-  return {
-    ...item,
-    loyaltyPoints: points,
-    cashbackReserve: cashback,
-  };
-});
-return { settledAllocations };`,
-      },
-      {
-        id: "sales-final-reduction",
-        kind: "cell",
-        code: `const items = inputs.settledAllocations;
+return { commissionedItems };`,
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const items = inputs.commissionedItems;
 let sumGross = 0;
 let sumTax = 0;
 let sumRebate = 0;
 let sumCommission = 0;
 let sumSurcharge = 0;
-let sumCashback = 0;
 
 for (const it of items) {
   sumGross += it.netGross;
@@ -239,10 +216,9 @@ for (const it of items) {
   sumRebate += it.rebateAmount;
   sumCommission += it.commissionAmount;
   sumSurcharge += it.logisticsSurcharge;
-  sumCashback += it.cashbackReserve;
 }
 
-const netSettlement = sumGross + sumTax - sumRebate - sumCommission - sumSurcharge - sumCashback;
+const netSettlement = sumGross + sumTax - sumRebate - sumCommission - sumSurcharge;
 const effectiveMargin = Math.round((netSettlement / (sumGross || 1)) * 10000) / 100;
 
 return {
@@ -252,18 +228,18 @@ return {
   effectiveMarginPct: effectiveMargin,
   auditPassed: netSettlement > 0 && items.length === 12,
 };`,
-      },
-    ],
-  },
+        },
+      ],
+    },
 
-  // 2. rb-designed-risk-assessment (8 cells, chain depth 7)
-  {
-    name: "rb-designed-risk-assessment",
-    steps: [
-      {
-        id: "risk-raw-applicants",
-        kind: "cell",
-        code: `const applicants = [
+    // 2. rb-designed-risk-assessment (7 cells)
+    {
+      name: "rb-designed-risk-assessment",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const applicants = [
   { id: 'APP-01', age: 34, monthlyIncome: 15000, monthlyDebt: 3500, creditHistoryYears: 8, missedPayments: 0, loanAmount: 60000, collateralValue: 90000 },
   { id: 'APP-02', age: 26, monthlyIncome: 7500, monthlyDebt: 3200, creditHistoryYears: 3, missedPayments: 2, loanAmount: 40000, collateralValue: 45000 },
   { id: 'APP-03', age: 48, monthlyIncome: 28000, monthlyDebt: 6000, creditHistoryYears: 18, missedPayments: 0, loanAmount: 150000, collateralValue: 250000 },
@@ -274,11 +250,11 @@ return {
   { id: 'APP-08', age: 37, monthlyIncome: 13000, monthlyDebt: 5900, creditHistoryYears: 9, missedPayments: 1, loanAmount: 70000, collateralValue: 80000 },
 ];
 return { applicants };`,
-      },
-      {
-        id: "risk-dti-score",
-        kind: "cell",
-        code: `const dtiProfiles = inputs.applicants.map((a) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const dtiProfiles = inputs.applicants.map((a) => {
   const dti = (a.monthlyDebt / a.monthlyIncome) * 100;
   let dtiScore = 100 - (dti * 1.5);
   if (dtiScore < 0) dtiScore = 0;
@@ -289,11 +265,11 @@ return { applicants };`,
   };
 });
 return { dtiProfiles };`,
-      },
-      {
-        id: "risk-ltv-score",
-        kind: "cell",
-        code: `const ltvProfiles = inputs.dtiProfiles.map((a) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const ltvProfiles = inputs.dtiProfiles.map((a) => {
   const ltv = (a.loanAmount / a.collateralValue) * 100;
   let ltvScore = 100 - ((ltv - 50) * 1.2);
   if (ltvScore > 100) ltvScore = 100;
@@ -305,11 +281,11 @@ return { dtiProfiles };`,
   };
 });
 return { ltvProfiles };`,
-      },
-      {
-        id: "risk-repayment-capacity",
-        kind: "cell",
-        code: `const capacityProfiles = inputs.ltvProfiles.map((a) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const capacityProfiles = inputs.ltvProfiles.map((a) => {
   const estimatedMonthlyInstallment = (a.loanAmount * 0.08) / 12;
   const disposableIncome = a.monthlyIncome - a.monthlyDebt - estimatedMonthlyInstallment;
   const capacityRatio = disposableIncome / a.monthlyIncome;
@@ -323,11 +299,11 @@ return { ltvProfiles };`,
   };
 });
 return { capacityProfiles };`,
-      },
-      {
-        id: "risk-history-penalty",
-        kind: "cell",
-        code: `const historyScores = inputs.capacityProfiles.map((a) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const historyScores = inputs.capacityProfiles.map((a) => {
   let penalty = a.missedPayments * 22;
   let bonus = Math.min(a.creditHistoryYears * 2.5, 25);
   let baseScore = 75 - penalty + bonus;
@@ -339,27 +315,14 @@ return { capacityProfiles };`,
   };
 });
 return { historyScores };`,
-      },
-      {
-        id: "risk-composite-index",
-        kind: "cell",
-        code: `const riskScores = inputs.historyScores.map((a) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const riskScores = inputs.historyScores.map((a) => {
   const composite = (a.dtiScore * 0.30) + (a.ltvScore * 0.25) + (a.capacityScore * 0.25) + (a.creditBehaviorScore * 0.20);
   const riskIndex = 100 - composite;
-  return {
-    id: a.id,
-    loanAmount: a.loanAmount,
-    riskIndex: Math.round(riskIndex * 100) / 100,
-    creditBehaviorScore: a.creditBehaviorScore,
-  };
-});
-return { riskScores };`,
-      },
-      {
-        id: "risk-stress-test",
-        kind: "cell",
-        code: `const stressedPortfolio = inputs.riskScores.map((a) => {
-  const stressedIndex = a.riskIndex * 1.15;
+  const stressedIndex = riskIndex * 1.15;
   const expectedDefaultRate = Math.pow(stressedIndex / 100, 2) * 0.25;
   const expectedLoss = a.loanAmount * expectedDefaultRate;
   const approved = stressedIndex < 42;
@@ -367,15 +330,16 @@ return { riskScores };`,
     id: a.id,
     approved,
     loanAmount: a.loanAmount,
+    riskIndex: Math.round(riskIndex * 100) / 100,
     expectedLoss: Math.round(expectedLoss * 100) / 100,
   };
 });
-return { stressedPortfolio };`,
-      },
-      {
-        id: "risk-verdict-reduction",
-        kind: "cell",
-        code: `const portfolio = inputs.stressedPortfolio;
+return { riskScores };`,
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const portfolio = inputs.riskScores;
 let approvedCount = 0;
 let committedCapital = 0;
 let totalLossProvision = 0;
@@ -398,18 +362,18 @@ return {
   lossProvisionRatioPct: lossProvisionRatio,
   portfolioStatus: approvedCount >= 4 ? 'HEALTHY' : 'CONSTRAINED',
 };`,
-      },
-    ],
-  },
+        },
+      ],
+    },
 
-  // 3. rb-designed-text-pipeline (7 cells, chain depth 6)
-  {
-    name: "rb-designed-text-pipeline",
-    steps: [
-      {
-        id: "text-raw-docs",
-        kind: "cell",
-        code: `const documents = [
+    // 3. rb-designed-text-pipeline (7 cells)
+    {
+      name: "rb-designed-text-pipeline",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const documents = [
   'Data science and artificial intelligence transform modern enterprise software architectures rapidly.',
   'Enterprise cloud computing accelerates digital transformation through reliable data pipelines.',
   'Machine learning models require clean data pipelines and continuous validation systems.',
@@ -420,11 +384,11 @@ return {
   'Artificial intelligence and cloud computing empower enterprise data intelligence workflows.',
 ];
 return { documents };`,
-      },
-      {
-        id: "text-tokenize",
-        kind: "cell",
-        code: `const STOPWORDS = new Set(['and', 'the', 'is', 'in', 'to', 'through', 'using', 'of', 'for', 'a']);
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const STOPWORDS = new Set(['and', 'the', 'is', 'in', 'to', 'through', 'using', 'of', 'for', 'a']);
 const tokenizedDocs = inputs.documents.map((doc, docId) => {
   const words = doc
     .toLowerCase()
@@ -434,11 +398,11 @@ const tokenizedDocs = inputs.documents.map((doc, docId) => {
   return { docId, words };
 });
 return { tokenizedDocs };`,
-      },
-      {
-        id: "text-vocab-frequencies",
-        kind: "cell",
-        code: `const docCount = inputs.tokenizedDocs.length;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const docCount = inputs.tokenizedDocs.length;
 const docFreq = {};
 const termFreqs = [];
 
@@ -456,27 +420,27 @@ for (const d of inputs.tokenizedDocs) {
 }
 
 return { docCount, docFreq, termFreqs };`,
-      },
-      {
-        id: "text-idf-weights",
-        kind: "cell",
-        code: `const { docCount, docFreq, termFreqs } = inputs;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const { docCount, docFreq, termFreqs } = inputs;
 const idfMap = {};
 for (const [w, df] of Object.entries(docFreq)) {
   const idf = Math.log((docCount + 1) / (df + 1)) + 1;
   idfMap[w] = Math.round(idf * 1000) / 1000;
 }
 return { idfMap, termFreqs };`,
-      },
-      {
-        id: "text-tfidf-vectors",
-        kind: "cell",
-        code: `const { idfMap, termFreqs } = inputs;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const { idfMap, termFreqs } = inputs;
 const docVectors = termFreqs.map((d) => {
   const vector = {};
   let sumSq = 0;
   for (const [w, count] of Object.entries(d.tf)) {
-    const tf = (count) / d.wordCount;
+    const tf = count / d.wordCount;
     const idf = idfMap[w] || 1;
     const score = tf * idf;
     vector[w] = score;
@@ -490,11 +454,11 @@ const docVectors = termFreqs.map((d) => {
   return { docId: d.docId, vector: normalized };
 });
 return { docVectors };`,
-      },
-      {
-        id: "text-similarity-matrix",
-        kind: "cell",
-        code: `const vectors = inputs.docVectors;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const vectors = inputs.docVectors;
 const pairwiseScores = [];
 
 for (let i = 0; i < vectors.length; i++) {
@@ -511,23 +475,11 @@ for (let i = 0; i < vectors.length; i++) {
   }
 }
 return { pairwiseScores };`,
-      },
-      {
-        id: "text-cluster-density",
-        kind: "cell",
-        code: `const scores = inputs.pairwiseScores;
-const highDensityPairs = scores.filter((s) => s >= 0.20);
-const densityRatio = highDensityPairs.length / (scores.length || 1);
-const clusterThreshold = Math.round(densityRatio * 1000) / 10;
-return {
-  clusterThreshold,
-  pairwiseScores: scores,
-};`,
-      },
-      {
-        id: "text-semantic-digest-reduction",
-        kind: "cell",
-        code: `const { pairwiseScores: scores, clusterThreshold } = inputs;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const scores = inputs.pairwiseScores;
 let sum = 0;
 let maxSim = -1;
 let minSim = 2;
@@ -548,21 +500,20 @@ return {
   maxSimilarity: maxSim,
   minSimilarity: minSim,
   strongConnectionCount: strongPairs,
-  clusterThreshold,
   corpusCohesive: avgSim > 0.08 && strongPairs >= 5,
 };`,
-      },
-    ],
-  },
+        },
+      ],
+    },
 
-  // 4. rb-designed-task-scheduling (8 cells, chain depth 7)
-  {
-    name: "rb-designed-task-scheduling",
-    steps: [
-      {
-        id: "task-raw-manifest",
-        kind: "cell",
-        code: `const tasks = [
+    // 4. rb-designed-task-scheduling (8 cells)
+    {
+      name: "rb-designed-task-scheduling",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const tasks = [
   { id: 'T1', duration: 4, deps: [], priority: 1, ramMb: 512 },
   { id: 'T2', duration: 6, deps: ['T1'], priority: 2, ramMb: 1024 },
   { id: 'T3', duration: 3, deps: ['T1'], priority: 1, ramMb: 256 },
@@ -574,18 +525,18 @@ return {
   { id: 'T9', duration: 5, deps: ['T7', 'T8'], priority: 3, ramMb: 1024 },
 ];
 return { tasks };`,
-      },
-      {
-        id: "task-topo-sort",
-        kind: "cell",
-        code: `const tasks = inputs.tasks;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const tasks = inputs.tasks;
 const sorted = [...tasks].sort((a, b) => a.deps.length - b.deps.length || a.id.localeCompare(b.id));
 return { sortedTasks: sorted };`,
-      },
-      {
-        id: "task-forward-pass",
-        kind: "cell",
-        code: `const tasks = inputs.sortedTasks;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const tasks = inputs.sortedTasks;
 const finishTimes = {};
 const forward = tasks.map((t) => {
   let estStart = 0;
@@ -603,11 +554,11 @@ const forward = tasks.map((t) => {
   };
 });
 return { forwardSchedule: forward };`,
-      },
-      {
-        id: "task-backward-pass",
-        kind: "cell",
-        code: `const forward = inputs.forwardSchedule;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const forward = inputs.forwardSchedule;
 const maxSpan = Math.max(...forward.map((t) => t.estFinish));
 const latestStartMap = {};
 
@@ -628,11 +579,11 @@ const bounded = forward.map((t) => ({
   slack: latestStartMap[t.id] - t.estStart,
 }));
 return { boundedSchedule: bounded };`,
-      },
-      {
-        id: "task-critical-path",
-        kind: "cell",
-        code: `const bounded = inputs.boundedSchedule;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const bounded = inputs.boundedSchedule;
 const critical = bounded.map((t) => ({
   id: t.id,
   duration: t.duration,
@@ -643,11 +594,11 @@ const critical = bounded.map((t) => ({
   estFinish: t.estFinish,
 }));
 return { criticalSchedule: critical };`,
-      },
-      {
-        id: "task-resource-allocation",
-        kind: "cell",
-        code: `const critical = inputs.criticalSchedule;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const critical = inputs.criticalSchedule;
 const allocated = critical.map((t) => {
   let workerSlot = 1;
   if (t.isCritical && t.priority >= 3) {
@@ -661,11 +612,11 @@ const allocated = critical.map((t) => {
   };
 });
 return { allocatedSchedule: allocated };`,
-      },
-      {
-        id: "task-buffer-injection",
-        kind: "cell",
-        code: `const allocated = inputs.allocatedSchedule;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const allocated = inputs.allocatedSchedule;
 const buffered = allocated.map((t) => {
   let bufferHours = 0;
   if (t.isCritical) {
@@ -678,11 +629,11 @@ const buffered = allocated.map((t) => {
   };
 });
 return { bufferedSchedule: buffered };`,
-      },
-      {
-        id: "task-makespan-reduction",
-        kind: "cell",
-        code: `const tasks = inputs.bufferedSchedule;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const tasks = inputs.bufferedSchedule;
 let totalWorkHours = 0;
 let totalBuffer = 0;
 let criticalCount = 0;
@@ -706,18 +657,18 @@ return {
   pipelineEfficiencyPct: efficiency,
   schedulingViable: maxFinish <= 40 && criticalCount >= 3,
 };`,
-      },
-    ],
-  },
+        },
+      ],
+    },
 
-  // 5. rb-designed-financial-reconciliation (8 cells, chain depth 7)
-  {
-    name: "rb-designed-financial-reconciliation",
-    steps: [
-      {
-        id: "recon-raw-feeds",
-        kind: "cell",
-        code: `const ledgerRecords = [
+    // 5. rb-designed-financial-reconciliation (8 cells)
+    {
+      name: "rb-designed-financial-reconciliation",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const ledgerRecords = [
   { ref: 'REF-001', amount: 1500000, curr: 'IDR', fee: 0, date: '2026-08-01' },
   { ref: 'REF-002', amount: 250, curr: 'USD', fee: 5, date: '2026-08-01' },
   { ref: 'REF-003', amount: 3200000, curr: 'IDR', fee: 0, date: '2026-08-02' },
@@ -739,11 +690,11 @@ const gatewayRecords = [
   { ref: 'REF-008', netPaid: 93.1, gatewayFee: 1.9, curr: 'USD' },
 ];
 return { ledgerRecords, gatewayRecords };`,
-      },
-      {
-        id: "recon-fx-normalization",
-        kind: "cell",
-        code: `const FX_RATES = { IDR: 1, USD: 16000, EUR: 17500 };
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const FX_RATES = { IDR: 1, USD: 16000, EUR: 17500 };
 const normalizedLedger = inputs.ledgerRecords.map((l) => {
   const rate = FX_RATES[l.curr] || 1;
   const baseAmt = l.amount * rate;
@@ -763,11 +714,11 @@ const normalizedGateway = inputs.gatewayRecords.map((g) => {
   };
 });
 return { normalizedLedger, normalizedGateway };`,
-      },
-      {
-        id: "recon-match-batches",
-        kind: "cell",
-        code: `const { normalizedLedger, normalizedGateway } = inputs;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const { normalizedLedger, normalizedGateway } = inputs;
 const gwMap = {};
 for (const g of normalizedGateway) gwMap[g.ref] = g;
 
@@ -784,11 +735,11 @@ const matchedPairs = normalizedLedger.map((l) => {
   };
 });
 return { matchedPairs };`,
-      },
-      {
-        id: "recon-fee-compliance",
-        kind: "cell",
-        code: `const audited = inputs.matchedPairs.map((p) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const audited = inputs.matchedPairs.map((p) => {
   const feePct = (p.gatewayFee / (p.ledgerGross || 1)) * 100;
   const compliant = feePct <= 2.5;
   return {
@@ -798,11 +749,11 @@ return { matchedPairs };`,
   };
 });
 return { auditedBatches: audited };`,
-      },
-      {
-        id: "recon-suspense-holds",
-        kind: "cell",
-        code: `const withHolds = inputs.auditedBatches.map((b) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const withHolds = inputs.auditedBatches.map((b) => {
   let holdbackAmount = 0;
   if (!b.isCompliant || b.grossDiff > 500) {
     holdbackAmount = Math.round(b.ledgerGross * 0.10);
@@ -813,11 +764,11 @@ return { auditedBatches: audited };`,
   };
 });
 return { holdbackBatches: withHolds };`,
-      },
-      {
-        id: "recon-tax-withholding",
-        kind: "cell",
-        code: `const taxed = inputs.holdbackBatches.map((h) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const taxed = inputs.holdbackBatches.map((h) => {
   const pph23OnFee = Math.round(h.gatewayFee * 0.02);
   return {
     ...h,
@@ -825,11 +776,11 @@ return { holdbackBatches: withHolds };`,
   };
 });
 return { taxedSettlement: taxed };`,
-      },
-      {
-        id: "recon-clearing-balances",
-        kind: "cell",
-        code: `const cleared = inputs.taxedSettlement.map((t) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const cleared = inputs.taxedSettlement.map((t) => {
   const netClearing = t.gatewayNet - t.holdbackAmount + t.pph23Withholding;
   return {
     ref: t.ref,
@@ -839,11 +790,11 @@ return { taxedSettlement: taxed };`,
   };
 });
 return { clearedRecords: cleared };`,
-      },
-      {
-        id: "recon-certificate-reduction",
-        kind: "cell",
-        code: `const records = inputs.clearedRecords;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const records = inputs.clearedRecords;
 let totalGrossCleared = 0;
 let totalDiff = 0;
 let compliantCount = 0;
@@ -863,18 +814,18 @@ return {
   complianceRatePct: matchRate,
   reconciliationPassed: totalDiff === 0 && matchRate >= 90,
 };`,
-      },
-    ],
-  },
+        },
+      ],
+    },
 
-  // 6. rb-designed-credit-scoring (8 cells, chain depth 7)
-  {
-    name: "rb-designed-credit-scoring",
-    steps: [
-      {
-        id: "score-raw-profiles",
-        kind: "cell",
-        code: `const bureauProfiles = [
+    // 6. rb-designed-credit-scoring (9 cells)
+    {
+      name: "rb-designed-credit-scoring",
+      steps: [
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const bureauProfiles = [
   { id: 'BOR-101', age: 42, jobTenureYears: 9, inquiries6m: 0, utilPct: 22, late30d: 0, lines: 4 },
   { id: 'BOR-102', age: 25, jobTenureYears: 1, inquiries6m: 3, utilPct: 82, late30d: 2, lines: 2 },
   { id: 'BOR-103', age: 36, jobTenureYears: 6, inquiries6m: 1, utilPct: 35, late30d: 0, lines: 5 },
@@ -887,11 +838,11 @@ return {
   { id: 'BOR-110', age: 58, jobTenureYears: 20, inquiries6m: 0, utilPct: 10, late30d: 0, lines: 7 },
 ];
 return { bureauProfiles };`,
-      },
-      {
-        id: "score-feature-binning",
-        kind: "cell",
-        code: `const binned = inputs.bureauProfiles.map((p) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const binned = inputs.bureauProfiles.map((p) => {
   const ageBin = p.age < 30 ? 'YOUNG' : p.age < 50 ? 'MID' : 'SENIOR';
   const utilBin = p.utilPct < 30 ? 'LOW' : p.utilPct < 60 ? 'MED' : 'HIGH';
   const inqBin = p.inquiries6m === 0 ? 'ZERO' : p.inquiries6m <= 2 ? 'FEW' : 'MANY';
@@ -903,11 +854,11 @@ return { bureauProfiles };`,
   };
 });
 return { binnedProfiles: binned };`,
-      },
-      {
-        id: "score-woe-transform",
-        kind: "cell",
-        code: `const WOE_TABLE = {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const WOE_TABLE = {
   ageBin: { YOUNG: -0.35, MID: 0.20, SENIOR: 0.45 },
   utilBin: { LOW: 0.65, MED: 0.10, HIGH: -0.80 },
   inqBin: { ZERO: 0.40, FEW: -0.15, MANY: -0.75 },
@@ -928,11 +879,11 @@ const transformed = inputs.binnedProfiles.map((p) => {
   };
 });
 return { woeProfiles: transformed };`,
-      },
-      {
-        id: "score-logit-calc",
-        kind: "cell",
-        code: `const withLogits = inputs.woeProfiles.map((p) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const withLogits = inputs.woeProfiles.map((p) => {
   const logit = 0.5 + (p.wAge * 0.8) + (p.wUtil * 1.4) + (p.wInq * 0.9) + (p.wLate * 1.6) + (p.lines * 0.05);
   return {
     id: p.id,
@@ -940,11 +891,11 @@ return { woeProfiles: transformed };`,
   };
 });
 return { logitProfiles: withLogits };`,
-      },
-      {
-        id: "score-scorecard-scaling",
-        kind: "cell",
-        code: `// Scale logit to standard credit score (PDO = 20, Target 600 at logit 0)
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `// Scale logit to standard credit score (PDO = 20, Target 600 at logit 0)
 const scaled = inputs.logitProfiles.map((p) => {
   const score = 600 + (p.logit * 28.85);
   let finalScore = Math.round(score);
@@ -956,11 +907,11 @@ const scaled = inputs.logitProfiles.map((p) => {
   };
 });
 return { creditScores: scaled };`,
-      },
-      {
-        id: "score-risk-tiering",
-        kind: "cell",
-        code: `const tiered = inputs.creditScores.map((s) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const tiered = inputs.creditScores.map((s) => {
   let tier = 'SUBPRIME';
   let maxLimit = 5000;
   if (s.creditScore >= 740) {
@@ -980,11 +931,11 @@ return { creditScores: scaled };`,
   };
 });
 return { tieredDecisions: tiered };`,
-      },
-      {
-        id: "score-pricing-matrix",
-        kind: "cell",
-        code: `const priced = inputs.tieredDecisions.map((d) => {
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const priced = inputs.tieredDecisions.map((d) => {
   const baseRate = 0.075;
   const spread = d.tier === 'PRIME' ? 0.02 : d.tier === 'NEAR_PRIME' ? 0.045 : d.tier === 'ACCEPTABLE' ? 0.08 : 0.14;
   return {
@@ -994,15 +945,29 @@ return { tieredDecisions: tiered };`,
   };
 });
 return { portfolioPricing: priced };`,
-      },
-      {
-        id: "score-portfolio-reduction",
-        kind: "cell",
-        code: `const items = inputs.portfolioPricing;
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const allocatedCapital = inputs.portfolioPricing.map((p) => {
+  const reserveRatio = p.tier === 'PRIME' ? 0.05 : p.tier === 'NEAR_PRIME' ? 0.10 : 0.20;
+  const requiredCapitalReserve = Math.round(p.maxLimit * reserveRatio);
+  return {
+    ...p,
+    requiredCapitalReserve,
+  };
+});
+return { allocatedCapital };`,
+        },
+        {
+          id: randomUUID(),
+          kind: "cell",
+          code: `const items = inputs.allocatedCapital;
 let sumScore = 0;
 let approvedCount = 0;
 let totalLimit = 0;
 let sumApr = 0;
+let totalReserves = 0;
 
 for (const it of items) {
   sumScore += it.creditScore;
@@ -1010,6 +975,7 @@ for (const it of items) {
     approvedCount++;
     totalLimit += it.maxLimit;
     sumApr += it.offeredApr;
+    totalReserves += it.requiredCapitalReserve;
   }
 }
 
@@ -1021,17 +987,19 @@ return {
   averageCreditScore: avgScore,
   approvedCount,
   totalCreditLimitAssigned: totalLimit,
+  totalCapitalReservesCommitted: totalReserves,
   averageApprovedAprPct: avgApr,
   portfolioAcceptable: avgScore >= 620 && approvedCount >= 6,
 };`,
-      },
-    ],
-  },
-];
+        },
+      ],
+    },
+  ];
+}
 
 async function main() {
   console.log("=======================================================");
-  console.log("R10 — CREATING & VERIFYING 6 DESIGNED NOTEBOOKS");
+  console.log("R10.1 — REBUILDING 6 DESIGNED BENCHMARK NOTEBOOKS");
   console.log("=======================================================");
 
   const fixturesDir = join(process.cwd(), "fixtures", "designed");
@@ -1040,9 +1008,11 @@ async function main() {
   const existing = await listNotebooks();
   const existingMap = new Map(existing.map((n) => [n.name, n.id]));
 
-  for (let idx = 0; idx < DESIGNED_NOTEBOOKS.length; idx++) {
-    const nbDef = DESIGNED_NOTEBOOKS[idx];
-    console.log(`\n[${idx + 1}/6] Provisioning ${nbDef.name} (${nbDef.steps.length} cells)...`);
+  const definitions = createDesignedNotebookDefinitions();
+
+  for (let idx = 0; idx < definitions.length; idx++) {
+    const nbDef = definitions[idx];
+    console.log(`\n[${idx + 1}/6] Provisioning ${nbDef.name} (${nbDef.steps.length} cells with UUID IDs)...`);
 
     let nbId = existingMap.get(nbDef.name);
     let doc: any;
@@ -1086,7 +1056,8 @@ async function main() {
   }
 
   console.log("\n" + "=".repeat(55));
-  console.log("ALL 6 DESIGNED NOTEBOOKS CREATED & VERIFIED DETERMINISTIC");
+  console.log("ALL 6 DESIGNED NOTEBOOKS REBUILT & VERIFIED DETERMINISTIC");
+  console.log("Lengths: 6, 7, 7, 8, 8, 9 with randomUUID() IDs");
   console.log("=".repeat(55));
 }
 

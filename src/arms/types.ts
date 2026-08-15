@@ -2,7 +2,7 @@
  * Arm Types & Definitions (R6 & R6.1 & R5.1 & R9)
  */
 
-import type { Mutation, Stratum, HopBand } from "../mutate";
+import type { Mutation, Stratum, HopBand, DistBand } from "../mutate";
 
 export type StopReason = "finished" | "max-turns" | "protocol" | "length";
 
@@ -12,6 +12,8 @@ export interface ArmResult {
   stratum: Stratum;
   hopDistance: number;
   hopBand: HopBand;
+  distanceToTerminal: number;
+  distBand: DistBand;
   model: string;
 
   editedCells: string[];

@@ -2,44 +2,39 @@
   "name": "rb-designed-text-pipeline",
   "steps": [
     {
-      "id": "text-raw-docs",
+      "id": "ce608e9f-7232-41b4-b9da-d21143426cfe",
       "kind": "cell",
       "code": "const documents = [\n  'Data science and artificial intelligence transform modern enterprise software architectures rapidly.',\n  'Enterprise cloud computing accelerates digital transformation through reliable data pipelines.',\n  'Machine learning models require clean data pipelines and continuous validation systems.',\n  'Modern software architectures leverage distributed data processing and resilient cloud infrastructures.',\n  'Natural language processing enhances enterprise automation through intelligent text analysis.',\n  'Distributed systems process massive datasets using scalable cloud computing architectures.',\n  'Continuous integration and automated validation ensure reliable machine learning deployment.',\n  'Artificial intelligence and cloud computing empower enterprise data intelligence workflows.',\n];\nreturn { documents };"
     },
     {
-      "id": "text-tokenize",
+      "id": "d6dd7272-7ee0-42ce-a60c-937fc0cbd9cf",
       "kind": "cell",
       "code": "const STOPWORDS = new Set(['and', 'the', 'is', 'in', 'to', 'through', 'using', 'of', 'for', 'a']);\nconst tokenizedDocs = inputs.documents.map((doc, docId) => {\n  const words = doc\n    .toLowerCase()\n    .replace(/[^a-z0-9\\s]/g, '')\n    .split(/\\s+/)\n    .filter((w) => w.length > 2 && !STOPWORDS.has(w));\n  return { docId, words };\n});\nreturn { tokenizedDocs };"
     },
     {
-      "id": "text-vocab-frequencies",
+      "id": "a0d7ba63-b230-4e13-83f9-b6856580f1bc",
       "kind": "cell",
       "code": "const docCount = inputs.tokenizedDocs.length;\nconst docFreq = {};\nconst termFreqs = [];\n\nfor (const d of inputs.tokenizedDocs) {\n  const tf = {};\n  const seenInDoc = new Set();\n  for (const w of d.words) {\n    tf[w] = (tf[w] || 0) + 1;\n    seenInDoc.add(w);\n  }\n  termFreqs.push({ docId: d.docId, tf, wordCount: d.words.length });\n  for (const w of seenInDoc) {\n    docFreq[w] = (docFreq[w] || 0) + 1;\n  }\n}\n\nreturn { docCount, docFreq, termFreqs };"
     },
     {
-      "id": "text-idf-weights",
+      "id": "cd7a14c8-aee5-42bb-81d4-104d919210de",
       "kind": "cell",
       "code": "const { docCount, docFreq, termFreqs } = inputs;\nconst idfMap = {};\nfor (const [w, df] of Object.entries(docFreq)) {\n  const idf = Math.log((docCount + 1) / (df + 1)) + 1;\n  idfMap[w] = Math.round(idf * 1000) / 1000;\n}\nreturn { idfMap, termFreqs };"
     },
     {
-      "id": "text-tfidf-vectors",
+      "id": "c21c1119-99de-435e-9a0d-c5ad87312a9e",
       "kind": "cell",
-      "code": "const { idfMap, termFreqs } = inputs;\nconst docVectors = termFreqs.map((d) => {\n  const vector = {};\n  let sumSq = 0;\n  for (const [w, count] of Object.entries(d.tf)) {\n    const tf = (count) / d.wordCount;\n    const idf = idfMap[w] || 1;\n    const score = tf * idf;\n    vector[w] = score;\n    sumSq += score * score;\n  }\n  const magnitude = Math.sqrt(sumSq) || 1;\n  const normalized = {};\n  for (const [w, sc] of Object.entries(vector)) {\n    normalized[w] = Math.round((sc / magnitude) * 1000) / 1000;\n  }\n  return { docId: d.docId, vector: normalized };\n});\nreturn { docVectors };"
+      "code": "const { idfMap, termFreqs } = inputs;\nconst docVectors = termFreqs.map((d) => {\n  const vector = {};\n  let sumSq = 0;\n  for (const [w, count] of Object.entries(d.tf)) {\n    const tf = count / d.wordCount;\n    const idf = idfMap[w] || 1;\n    const score = tf * idf;\n    vector[w] = score;\n    sumSq += score * score;\n  }\n  const magnitude = Math.sqrt(sumSq) || 1;\n  const normalized = {};\n  for (const [w, sc] of Object.entries(vector)) {\n    normalized[w] = Math.round((sc / magnitude) * 1000) / 1000;\n  }\n  return { docId: d.docId, vector: normalized };\n});\nreturn { docVectors };"
     },
     {
-      "id": "text-similarity-matrix",
+      "id": "f856d138-cc39-42f0-954e-78b269409a09",
       "kind": "cell",
       "code": "const vectors = inputs.docVectors;\nconst pairwiseScores = [];\n\nfor (let i = 0; i < vectors.length; i++) {\n  for (let j = i + 1; j < vectors.length; j++) {\n    const v1 = vectors[i].vector;\n    const v2 = vectors[j].vector;\n    let dot = 0;\n    for (const [k, val] of Object.entries(v1)) {\n      if (v2[k]) {\n        dot += val * v2[k];\n      }\n    }\n    pairwiseScores.push(Math.round(dot * 1000) / 1000);\n  }\n}\nreturn { pairwiseScores };"
     },
     {
-      "id": "text-cluster-density",
+      "id": "93840799-b022-404e-b328-c585b960b238",
       "kind": "cell",
-      "code": "const scores = inputs.pairwiseScores;\nconst highDensityPairs = scores.filter((s) => s >= 0.20);\nconst densityRatio = highDensityPairs.length / (scores.length || 1);\nconst clusterThreshold = Math.round(densityRatio * 1000) / 10;\nreturn {\n  clusterThreshold,\n  pairwiseScores: scores,\n};"
-    },
-    {
-      "id": "text-semantic-digest-reduction",
-      "kind": "cell",
-      "code": "const { pairwiseScores: scores, clusterThreshold } = inputs;\nlet sum = 0;\nlet maxSim = -1;\nlet minSim = 2;\nlet strongPairs = 0;\n\nfor (const s of scores) {\n  sum += s;\n  if (s > maxSim) maxSim = s;\n  if (s < minSim) minSim = s;\n  if (s >= 0.25) strongPairs++;\n}\n\nconst avgSim = Math.round((sum / (scores.length || 1)) * 1000) / 1000;\n\nreturn {\n  totalComparisons: scores.length,\n  averageSimilarity: avgSim,\n  maxSimilarity: maxSim,\n  minSimilarity: minSim,\n  strongConnectionCount: strongPairs,\n  clusterThreshold,\n  corpusCohesive: avgSim > 0.08 && strongPairs >= 5,\n};"
+      "code": "const scores = inputs.pairwiseScores;\nlet sum = 0;\nlet maxSim = -1;\nlet minSim = 2;\nlet strongPairs = 0;\n\nfor (const s of scores) {\n  sum += s;\n  if (s > maxSim) maxSim = s;\n  if (s < minSim) minSim = s;\n  if (s >= 0.25) strongPairs++;\n}\n\nconst avgSim = Math.round((sum / (scores.length || 1)) * 1000) / 1000;\n\nreturn {\n  totalComparisons: scores.length,\n  averageSimilarity: avgSim,\n  maxSimilarity: maxSim,\n  minSimilarity: minSim,\n  strongConnectionCount: strongPairs,\n  corpusCohesive: avgSim > 0.08 && strongPairs >= 5,\n};"
     }
   ],
   "id": "c53dd5bf-fa9b-4234-9ecd-f4e7dc0dfd02"

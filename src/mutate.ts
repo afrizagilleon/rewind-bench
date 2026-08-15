@@ -53,12 +53,20 @@ export function hopBandForDistance(hopDistance: number): HopBand {
   return "far";
 }
 
+export function distBandForDistance(distance: number): DistBand {
+  if (distance === 0) return "direct";
+  if (distance <= 3) return "short";
+  return "long";
+}
+
 export interface Mutation {
   id: string; // `${cellId}:${kind}:${index}`
   kind: MutationKind;
   stratum?: Stratum;
   hopDistance?: number;
   hopBand?: HopBand;
+  distanceToTerminal?: number;
+  distBand?: DistBand;
   notebookId: string;
   notebookName: string;
   cellId: string;
@@ -687,7 +695,8 @@ export function mutationsFor(
 
       if (typeof node.value === "number") {
         const n = node.value;
-        const newN = n === 0 ? 1 : n === 1 ? 0 : n + 1;
+        if (n === 0 || n === 1) return; // Skip 0 and 1 per R5.1/R10.1 specification
+        const newN = n + 1;
         mutatedVal = String(newN);
         desc = `perturbed numeric constant from ${n} to ${newN}`;
       } else if (typeof node.value === "boolean") {

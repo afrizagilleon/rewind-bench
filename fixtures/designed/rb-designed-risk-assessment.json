@@ -2,44 +2,39 @@
   "name": "rb-designed-risk-assessment",
   "steps": [
     {
-      "id": "risk-raw-applicants",
+      "id": "c0961115-8c8a-4693-8e77-d6ebb3358494",
       "kind": "cell",
       "code": "const applicants = [\n  { id: 'APP-01', age: 34, monthlyIncome: 15000, monthlyDebt: 3500, creditHistoryYears: 8, missedPayments: 0, loanAmount: 60000, collateralValue: 90000 },\n  { id: 'APP-02', age: 26, monthlyIncome: 7500, monthlyDebt: 3200, creditHistoryYears: 3, missedPayments: 2, loanAmount: 40000, collateralValue: 45000 },\n  { id: 'APP-03', age: 48, monthlyIncome: 28000, monthlyDebt: 6000, creditHistoryYears: 18, missedPayments: 0, loanAmount: 150000, collateralValue: 250000 },\n  { id: 'APP-04', age: 31, monthlyIncome: 11000, monthlyDebt: 4800, creditHistoryYears: 6, missedPayments: 1, loanAmount: 50000, collateralValue: 55000 },\n  { id: 'APP-05', age: 55, monthlyIncome: 22000, monthlyDebt: 2500, creditHistoryYears: 25, missedPayments: 0, loanAmount: 80000, collateralValue: 160000 },\n  { id: 'APP-06', age: 23, monthlyIncome: 5200, monthlyDebt: 2800, creditHistoryYears: 1, missedPayments: 3, loanAmount: 30000, collateralValue: 28000 },\n  { id: 'APP-07', age: 41, monthlyIncome: 18500, monthlyDebt: 5500, creditHistoryYears: 12, missedPayments: 0, loanAmount: 95000, collateralValue: 130000 },\n  { id: 'APP-08', age: 37, monthlyIncome: 13000, monthlyDebt: 5900, creditHistoryYears: 9, missedPayments: 1, loanAmount: 70000, collateralValue: 80000 },\n];\nreturn { applicants };"
     },
     {
-      "id": "risk-dti-score",
+      "id": "da4afa30-fa36-4861-a8df-e801b74fe3d0",
       "kind": "cell",
       "code": "const dtiProfiles = inputs.applicants.map((a) => {\n  const dti = (a.monthlyDebt / a.monthlyIncome) * 100;\n  let dtiScore = 100 - (dti * 1.5);\n  if (dtiScore < 0) dtiScore = 0;\n  return {\n    ...a,\n    dtiRatio: Math.round(dti * 100) / 100,\n    dtiScore: Math.round(dtiScore * 100) / 100,\n  };\n});\nreturn { dtiProfiles };"
     },
     {
-      "id": "risk-ltv-score",
+      "id": "168ae217-1cc7-4731-b5b0-558ffa28d323",
       "kind": "cell",
       "code": "const ltvProfiles = inputs.dtiProfiles.map((a) => {\n  const ltv = (a.loanAmount / a.collateralValue) * 100;\n  let ltvScore = 100 - ((ltv - 50) * 1.2);\n  if (ltvScore > 100) ltvScore = 100;\n  if (ltvScore < 0) ltvScore = 0;\n  return {\n    ...a,\n    ltvRatio: Math.round(ltv * 100) / 100,\n    ltvScore: Math.round(ltvScore * 100) / 100,\n  };\n});\nreturn { ltvProfiles };"
     },
     {
-      "id": "risk-repayment-capacity",
+      "id": "4e572629-c799-4a00-869a-a44e6687dc96",
       "kind": "cell",
       "code": "const capacityProfiles = inputs.ltvProfiles.map((a) => {\n  const estimatedMonthlyInstallment = (a.loanAmount * 0.08) / 12;\n  const disposableIncome = a.monthlyIncome - a.monthlyDebt - estimatedMonthlyInstallment;\n  const capacityRatio = disposableIncome / a.monthlyIncome;\n  let capacityScore = capacityRatio * 150;\n  if (capacityScore > 100) capacityScore = 100;\n  if (capacityScore < 0) capacityScore = 0;\n  return {\n    ...a,\n    disposableIncome: Math.round(disposableIncome),\n    capacityScore: Math.round(capacityScore * 100) / 100,\n  };\n});\nreturn { capacityProfiles };"
     },
     {
-      "id": "risk-history-penalty",
+      "id": "7756abba-c439-4942-9265-0aa7cb2cf3bb",
       "kind": "cell",
       "code": "const historyScores = inputs.capacityProfiles.map((a) => {\n  let penalty = a.missedPayments * 22;\n  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);\n  let baseScore = 75 - penalty + bonus;\n  if (baseScore > 100) baseScore = 100;\n  if (baseScore < 0) baseScore = 0;\n  return {\n    ...a,\n    creditBehaviorScore: Math.round(baseScore * 100) / 100,\n  };\n});\nreturn { historyScores };"
     },
     {
-      "id": "risk-composite-index",
+      "id": "ea41f26c-9129-4757-a629-3cd688e70991",
       "kind": "cell",
-      "code": "const riskScores = inputs.historyScores.map((a) => {\n  const composite = (a.dtiScore * 0.30) + (a.ltvScore * 0.25) + (a.capacityScore * 0.25) + (a.creditBehaviorScore * 0.20);\n  const riskIndex = 100 - composite;\n  return {\n    id: a.id,\n    loanAmount: a.loanAmount,\n    riskIndex: Math.round(riskIndex * 100) / 100,\n    creditBehaviorScore: a.creditBehaviorScore,\n  };\n});\nreturn { riskScores };"
+      "code": "const riskScores = inputs.historyScores.map((a) => {\n  const composite = (a.dtiScore * 0.30) + (a.ltvScore * 0.25) + (a.capacityScore * 0.25) + (a.creditBehaviorScore * 0.20);\n  const riskIndex = 100 - composite;\n  const stressedIndex = riskIndex * 1.15;\n  const expectedDefaultRate = Math.pow(stressedIndex / 100, 2) * 0.25;\n  const expectedLoss = a.loanAmount * expectedDefaultRate;\n  const approved = stressedIndex < 42;\n  return {\n    id: a.id,\n    approved,\n    loanAmount: a.loanAmount,\n    riskIndex: Math.round(riskIndex * 100) / 100,\n    expectedLoss: Math.round(expectedLoss * 100) / 100,\n  };\n});\nreturn { riskScores };"
     },
     {
-      "id": "risk-stress-test",
+      "id": "fbe1ca3c-77bf-4db1-b97c-eedf07e2a1f3",
       "kind": "cell",
-      "code": "const stressedPortfolio = inputs.riskScores.map((a) => {\n  const stressedIndex = a.riskIndex * 1.15;\n  const expectedDefaultRate = Math.pow(stressedIndex / 100, 2) * 0.25;\n  const expectedLoss = a.loanAmount * expectedDefaultRate;\n  const approved = stressedIndex < 42;\n  return {\n    id: a.id,\n    approved,\n    loanAmount: a.loanAmount,\n    expectedLoss: Math.round(expectedLoss * 100) / 100,\n  };\n});\nreturn { stressedPortfolio };"
-    },
-    {
-      "id": "risk-verdict-reduction",
-      "kind": "cell",
-      "code": "const portfolio = inputs.stressedPortfolio;\nlet approvedCount = 0;\nlet committedCapital = 0;\nlet totalLossProvision = 0;\n\nfor (const p of portfolio) {\n  if (p.approved) {\n    approvedCount++;\n    committedCapital += p.loanAmount;\n    totalLossProvision += p.expectedLoss;\n  }\n}\n\nconst lossProvisionRatio = Math.round((totalLossProvision / (committedCapital || 1)) * 10000) / 100;\n\nreturn {\n  totalApplicants: portfolio.length,\n  approvedCount,\n  committedCapital,\n  totalLossProvision: Math.round(totalLossProvision * 100) / 100,\n  lossProvisionRatioPct: lossProvisionRatio,\n  portfolioStatus: approvedCount >= 4 ? 'HEALTHY' : 'CONSTRAINED',\n};"
+      "code": "const portfolio = inputs.riskScores;\nlet approvedCount = 0;\nlet committedCapital = 0;\nlet totalLossProvision = 0;\n\nfor (const p of portfolio) {\n  if (p.approved) {\n    approvedCount++;\n    committedCapital += p.loanAmount;\n    totalLossProvision += p.expectedLoss;\n  }\n}\n\nconst lossProvisionRatio = Math.round((totalLossProvision / (committedCapital || 1)) * 10000) / 100;\n\nreturn {\n  totalApplicants: portfolio.length,\n  approvedCount,\n  committedCapital,\n  totalLossProvision: Math.round(totalLossProvision * 100) / 100,\n  lossProvisionRatioPct: lossProvisionRatio,\n  portfolioStatus: approvedCount >= 4 ? 'HEALTHY' : 'CONSTRAINED',\n};"
     }
   ],
   "id": "bf93ff1e-c517-46d4-9552-12aec6a64cce"

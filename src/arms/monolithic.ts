@@ -162,6 +162,8 @@ Locate the bug causing the final output discrepancy, fix it using notebook_edit_
   const luckyPass = resolved && !summary.editedCells.includes(mutation.cellId);
   const hopDistance = mutation.hopDistance ?? 1;
   const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+  const distanceToTerminal = mutation.distanceToTerminal ?? 0;
+  const distBand = mutation.distBand ?? distBandForDistance(distanceToTerminal);
   const stratum = mutation.stratum ?? stratumForKind(mutation.kind);
 
   return {
@@ -170,6 +172,8 @@ Locate the bug causing the final output discrepancy, fix it using notebook_edit_
     stratum,
     hopDistance,
     hopBand,
+    distanceToTerminal,
+    distBand,
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,

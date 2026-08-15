@@ -212,6 +212,8 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
   const luckyPass = resolved && !summary.editedCells.includes(mutation.cellId);
   const hopDistance = mutation.hopDistance ?? 1;
   const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+  const distanceToTerminal = mutation.distanceToTerminal ?? 0;
+  const distBand = mutation.distBand ?? distBandForDistance(distanceToTerminal);
   const stratum = mutation.stratum ?? stratumForKind(mutation.kind);
 
   return {
@@ -220,6 +222,8 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     stratum,
     hopDistance,
     hopBand,
+    distanceToTerminal,
+    distBand,
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,

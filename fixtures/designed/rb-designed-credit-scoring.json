@@ -2,44 +2,49 @@
   "name": "rb-designed-credit-scoring",
   "steps": [
     {
-      "id": "score-raw-profiles",
+      "id": "fc658bb3-818e-407d-8b21-41fbfa28c635",
       "kind": "cell",
       "code": "const bureauProfiles = [\n  { id: 'BOR-101', age: 42, jobTenureYears: 9, inquiries6m: 0, utilPct: 22, late30d: 0, lines: 4 },\n  { id: 'BOR-102', age: 25, jobTenureYears: 1, inquiries6m: 3, utilPct: 82, late30d: 2, lines: 2 },\n  { id: 'BOR-103', age: 36, jobTenureYears: 6, inquiries6m: 1, utilPct: 35, late30d: 0, lines: 5 },\n  { id: 'BOR-104', age: 51, jobTenureYears: 15, inquiries6m: 0, utilPct: 15, late30d: 0, lines: 8 },\n  { id: 'BOR-105', age: 29, jobTenureYears: 3, inquiries6m: 2, utilPct: 65, late30d: 1, lines: 3 },\n  { id: 'BOR-106', age: 47, jobTenureYears: 11, inquiries6m: 1, utilPct: 40, late30d: 0, lines: 6 },\n  { id: 'BOR-107', age: 31, jobTenureYears: 4, inquiries6m: 4, utilPct: 89, late30d: 3, lines: 4 },\n  { id: 'BOR-108', age: 39, jobTenureYears: 8, inquiries6m: 0, utilPct: 28, late30d: 0, lines: 5 },\n  { id: 'BOR-109', age: 28, jobTenureYears: 2, inquiries6m: 2, utilPct: 55, late30d: 1, lines: 2 },\n  { id: 'BOR-110', age: 58, jobTenureYears: 20, inquiries6m: 0, utilPct: 10, late30d: 0, lines: 7 },\n];\nreturn { bureauProfiles };"
     },
     {
-      "id": "score-feature-binning",
+      "id": "4873d366-9106-44bd-9e98-5d5acbe9d479",
       "kind": "cell",
       "code": "const binned = inputs.bureauProfiles.map((p) => {\n  const ageBin = p.age < 30 ? 'YOUNG' : p.age < 50 ? 'MID' : 'SENIOR';\n  const utilBin = p.utilPct < 30 ? 'LOW' : p.utilPct < 60 ? 'MED' : 'HIGH';\n  const inqBin = p.inquiries6m === 0 ? 'ZERO' : p.inquiries6m <= 2 ? 'FEW' : 'MANY';\n  return {\n    ...p,\n    ageBin,\n    utilBin,\n    inqBin,\n  };\n});\nreturn { binnedProfiles: binned };"
     },
     {
-      "id": "score-woe-transform",
+      "id": "5cf70f49-b081-4288-a451-897cb0652086",
       "kind": "cell",
       "code": "const WOE_TABLE = {\n  ageBin: { YOUNG: -0.35, MID: 0.20, SENIOR: 0.45 },\n  utilBin: { LOW: 0.65, MED: 0.10, HIGH: -0.80 },\n  inqBin: { ZERO: 0.40, FEW: -0.15, MANY: -0.75 },\n};\n\nconst transformed = inputs.binnedProfiles.map((p) => {\n  const wAge = WOE_TABLE.ageBin[p.ageBin] || 0;\n  const wUtil = WOE_TABLE.utilBin[p.utilBin] || 0;\n  const wInq = WOE_TABLE.inqBin[p.inqBin] || 0;\n  const wLate = p.late30d === 0 ? 0.50 : p.late30d === 1 ? -0.30 : -1.10;\n  return {\n    id: p.id,\n    wAge,\n    wUtil,\n    wInq,\n    wLate,\n    lines: p.lines,\n  };\n});\nreturn { woeProfiles: transformed };"
     },
     {
-      "id": "score-logit-calc",
+      "id": "ce17f454-332d-467a-bb83-35692b8493c2",
       "kind": "cell",
       "code": "const withLogits = inputs.woeProfiles.map((p) => {\n  const logit = 0.5 + (p.wAge * 0.8) + (p.wUtil * 1.4) + (p.wInq * 0.9) + (p.wLate * 1.6) + (p.lines * 0.05);\n  return {\n    id: p.id,\n    logit: Math.round(logit * 1000) / 1000,\n  };\n});\nreturn { logitProfiles: withLogits };"
     },
     {
-      "id": "score-scorecard-scaling",
+      "id": "268ae183-199f-4233-a630-bd1dc536200b",
       "kind": "cell",
       "code": "// Scale logit to standard credit score (PDO = 20, Target 600 at logit 0)\nconst scaled = inputs.logitProfiles.map((p) => {\n  const score = 600 + (p.logit * 28.85);\n  let finalScore = Math.round(score);\n  if (finalScore > 850) finalScore = 850;\n  if (finalScore < 300) finalScore = 300;\n  return {\n    id: p.id,\n    creditScore: finalScore,\n  };\n});\nreturn { creditScores: scaled };"
     },
     {
-      "id": "score-risk-tiering",
+      "id": "05148478-d435-4998-978b-5a36ec64dce5",
       "kind": "cell",
       "code": "const tiered = inputs.creditScores.map((s) => {\n  let tier = 'SUBPRIME';\n  let maxLimit = 5000;\n  if (s.creditScore >= 740) {\n    tier = 'PRIME';\n    maxLimit = 50000;\n  } else if (s.creditScore >= 670) {\n    tier = 'NEAR_PRIME';\n    maxLimit = 25000;\n  } else if (s.creditScore >= 580) {\n    tier = 'ACCEPTABLE';\n    maxLimit = 12000;\n  }\n  return {\n    ...s,\n    tier,\n    maxLimit,\n  };\n});\nreturn { tieredDecisions: tiered };"
     },
     {
-      "id": "score-pricing-matrix",
+      "id": "e20991bf-ea96-4de1-a1e7-0e234a0a292f",
       "kind": "cell",
       "code": "const priced = inputs.tieredDecisions.map((d) => {\n  const baseRate = 0.075;\n  const spread = d.tier === 'PRIME' ? 0.02 : d.tier === 'NEAR_PRIME' ? 0.045 : d.tier === 'ACCEPTABLE' ? 0.08 : 0.14;\n  return {\n    ...d,\n    offeredApr: Math.round((baseRate + spread) * 1000) / 10,\n    approved: d.tier !== 'SUBPRIME',\n  };\n});\nreturn { portfolioPricing: priced };"
     },
     {
-      "id": "score-portfolio-reduction",
+      "id": "cece82e6-8a73-4846-9e29-3580af4a658d",
       "kind": "cell",
-      "code": "const items = inputs.portfolioPricing;\nlet sumScore = 0;\nlet approvedCount = 0;\nlet totalLimit = 0;\nlet sumApr = 0;\n\nfor (const it of items) {\n  sumScore += it.creditScore;\n  if (it.approved) {\n    approvedCount++;\n    totalLimit += it.maxLimit;\n    sumApr += it.offeredApr;\n  }\n}\n\nconst avgScore = Math.round(sumScore / (items.length || 1));\nconst avgApr = approvedCount > 0 ? Math.round((sumApr / approvedCount) * 10) / 10 : 0;\n\nreturn {\n  totalProfiles: items.length,\n  averageCreditScore: avgScore,\n  approvedCount,\n  totalCreditLimitAssigned: totalLimit,\n  averageApprovedAprPct: avgApr,\n  portfolioAcceptable: avgScore >= 620 && approvedCount >= 6,\n};"
+      "code": "const allocatedCapital = inputs.portfolioPricing.map((p) => {\n  const reserveRatio = p.tier === 'PRIME' ? 0.05 : p.tier === 'NEAR_PRIME' ? 0.10 : 0.20;\n  const requiredCapitalReserve = Math.round(p.maxLimit * reserveRatio);\n  return {\n    ...p,\n    requiredCapitalReserve,\n  };\n});\nreturn { allocatedCapital };"
+    },
+    {
+      "id": "c06c2772-d713-4c5c-a109-06bfd643d3f8",
+      "kind": "cell",
+      "code": "const items = inputs.allocatedCapital;\nlet sumScore = 0;\nlet approvedCount = 0;\nlet totalLimit = 0;\nlet sumApr = 0;\nlet totalReserves = 0;\n\nfor (const it of items) {\n  sumScore += it.creditScore;\n  if (it.approved) {\n    approvedCount++;\n    totalLimit += it.maxLimit;\n    sumApr += it.offeredApr;\n    totalReserves += it.requiredCapitalReserve;\n  }\n}\n\nconst avgScore = Math.round(sumScore / (items.length || 1));\nconst avgApr = approvedCount > 0 ? Math.round((sumApr / approvedCount) * 10) / 10 : 0;\n\nreturn {\n  totalProfiles: items.length,\n  averageCreditScore: avgScore,\n  approvedCount,\n  totalCreditLimitAssigned: totalLimit,\n  totalCapitalReservesCommitted: totalReserves,\n  averageApprovedAprPct: avgApr,\n  portfolioAcceptable: avgScore >= 620 && approvedCount >= 6,\n};"
     }
   ],
   "id": "085e7d28-9c34-4c25-8d4f-1bbbd41e0bed"
