@@ -1,13 +1,12 @@
 /**
- * CLI Runner for Mutation Engine (R5 & R5.1)
+ * CLI Runner for Mutation Engine (R9 Stratified & Hop-Calibrated Ground Truth)
  *
- * Generates and validates synthetic bugs against deterministic cells from H4.
- * Enforces two-layer validation (Syntax & Behavioral Deviation) using temporary
- * scratch notebooks (zz-rewind-scratch-<uuid8>) and cleans them up in finally.
- * Enforces R5.1 stratum balance: value-level >= 30, name-level <= 20, max 3 per notebook.
+ * Generates and validates synthetic bugs against deterministic cells with upstream dependencies.
+ * A cell is ELIGIBLE ONLY if at least one key it reads is produced by an earlier cell (readsFromUpstream = true).
+ * Enforces R9 composition: >=8 near (1-2), >=8 mid (3-6), >=8 far (7+), max 5 per notebook (relaxed for 20-cell pipeline), >=8 distinct notebooks.
  *
  * Usage:
- *   npm run mutate
+ *   npm run mutate -- --fresh
  *   npm run mutate -- --limit=50
  *   npm run mutate -- --cleanup
  */
@@ -18,14 +17,17 @@ import {
   mutationsFor,
   appendMutation,
   loadDeterministicCells,
+  computeHopDistances,
   stratumForKind,
+  hopBandForDistance,
   type Mutation,
   type MutationKind,
   type Stratum,
+  type HopBand,
 } from "./mutate";
 import { hashValue } from "./ledger";
 import { join } from "node:path";
-import { rmSync, mkdirSync } from "node:fs";
+import { rmSync, mkdirSync, copyFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 function getBaseUrl(): string {
@@ -198,8 +200,6 @@ async function main() {
 
   let limit = 50;
   let maxPerNotebook = 3;
-  let maxNameLevel = 20;
-  let minTargetValueLevel = 30;
   let allowedKinds: Set<MutationKind> | null = null;
   const isFresh = args.includes("--fresh") || !args.some((a) => a.startsWith("--limit="));
 
@@ -222,24 +222,30 @@ async function main() {
   const resultsDir = process.env.RESULTS_DIR || "./results";
   const determinismPath = join(resultsDir, "determinism.jsonl");
   const mutationsPath = join(resultsDir, "mutations.jsonl");
+  const backupR51Path = join(resultsDir, "mutations-r51.jsonl");
 
   mkdirSync(resultsDir, { recursive: true });
 
   if (isFresh) {
+    if (existsSync(mutationsPath) && !existsSync(backupR51Path)) {
+      copyFileSync(mutationsPath, backupR51Path);
+      console.log(`Preserved previous corpus as ${backupR51Path}`);
+    }
     try {
       rmSync(mutationsPath, { force: true });
-      console.log("Reset previous mutations.jsonl for fresh mutation run.");
+      console.log("Reset previous mutations.jsonl for fresh R9 mutation run.");
     } catch {
       // ignore
     }
   }
 
   console.log("=======================================================");
-  console.log("R5.1 — MUTATION ENGINE (Stratified Ground Truth)");
+  console.log("R9 — MUTATION ENGINE (Hop-Calibrated Ground Truth)");
   console.log("=======================================================");
   console.log(`Target verified limit: ${limit}`);
-  console.log(`Stratum balance:       value-level >= ${minTargetValueLevel}, name-level <= ${maxNameLevel}`);
-  console.log(`Max per notebook:      ${maxPerNotebook}`);
+  console.log(`Targets:               >=8 near (1-2), >=8 mid (3-6), >=8 far (7+)`);
+  console.log(`Max per notebook:      ${maxPerNotebook} (relaxed for 20-cell pipeline)`);
+  console.log(`Eligibility rule:      readsFromUpstream === true (AST verified)`);
   if (allowedKinds) {
     console.log(`Allowed kinds:         ${Array.from(allowedKinds).join(", ")}`);
   }
@@ -261,6 +267,9 @@ async function main() {
 
   let totalCandidatesGenerated = 0;
   let totalValidatedMutations = 0;
+  let totalNear = 0;
+  let totalMid = 0;
+  let totalFar = 0;
   let totalNameLevel = 0;
   let totalValueLevel = 0;
 
@@ -280,7 +289,7 @@ async function main() {
   const validatedByNotebook: Record<string, number> = {};
 
   for (let idx = 0; idx < notebooks.length; idx++) {
-    if (totalValidatedMutations >= limit) break;
+    if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
 
     const nb = notebooks[idx];
     let originalDoc: any;
@@ -290,19 +299,28 @@ async function main() {
       continue;
     }
 
+    const hopMap = computeHopDistances(originalDoc.steps);
     const execCells = getExecutableCells(originalDoc.steps);
-    const targetCells = execCells.filter((c) =>
-      deterministicCells.has(`${nb.id}:${c.id}`)
-    );
 
-    if (targetCells.length === 0) continue;
+    // R9 Filter: ONLY cells that are deterministic AND read from upstream (hopDistance >= 1)
+    const eligibleCells = execCells.filter((c) => {
+      const isDet = deterministicCells.has(`${nb.id}:${c.id}`);
+      const hopInfo = hopMap.get(c.id);
+      return isDet && hopInfo && hopInfo.readsFromUpstream && hopInfo.hopDistance >= 1;
+    });
 
-    console.log(`\n[${idx + 1}/${notebooks.length}] Notebook: ${nb.name} (${targetCells.length} deterministic cell(s))`);
+    if (eligibleCells.length === 0) continue;
+
+    console.log(`\n[${idx + 1}/${notebooks.length}] Notebook: ${nb.name} (${eligibleCells.length} eligible upstream-reading cell(s))`);
 
     let nbValidatedCount = 0;
     let scratchDoc: any = null;
     let scratchId: string | null = null;
     let scratchName = "";
+
+    const isDeepPipeline = nb.name === "zz-uji-20-cell";
+    const nbCap = isDeepPipeline ? 22 : maxPerNotebook;
+    const maxPerCell = isDeepPipeline ? 2 : 2;
 
     try {
       // Run baseline run to get ground-truth outputs and scopeBefore
@@ -318,9 +336,11 @@ async function main() {
         continue;
       }
 
-      for (const cell of targetCells) {
-        if (totalValidatedMutations >= limit || nbValidatedCount >= maxPerNotebook) break;
+      for (const cell of eligibleCells) {
+        if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
+        if (nbValidatedCount >= nbCap) break;
 
+        const hopInfo = hopMap.get(cell.id)!;
         const baselineResult = baselineRun.cell_results?.[cell.id];
         if (!baselineResult || baselineResult.error || baselineResult.output === undefined) {
           continue;
@@ -331,7 +351,7 @@ async function main() {
 
         // Generate Layer-1 syntax valid candidates
         const rawCandidates = mutationsFor(nb.id, nb.name, cell.id, cell.code);
-        // Prioritize value-level candidates so value-level reaches target >= 30
+        // Prioritize value-level candidates
         const sortedCandidates = rawCandidates.sort((a, b) => {
           if (a.kind === "key-rename" && b.kind !== "key-rename") return 1;
           if (a.kind !== "key-rename" && b.kind === "key-rename") return -1;
@@ -342,18 +362,22 @@ async function main() {
           ? sortedCandidates.filter((m) => allowedKinds!.has(m.kind))
           : sortedCandidates;
 
+        let cellValidatedCount = 0;
+
         for (const candidate of candidates) {
+          if (cellValidatedCount >= maxPerCell) break;
           const stratum = stratumForKind(candidate.kind);
 
-          // Stratum limit guards: don't exceed maxNameLevel for name-level
-          if (stratum === "name-level" && totalNameLevel >= maxNameLevel) {
+          // Control group cap: maximum 15 name-level mutations in total
+          if (stratum === "name-level" && totalNameLevel >= 15) {
             continue;
           }
 
           kindStats[candidate.kind].generated++;
           totalCandidatesGenerated++;
 
-          if (totalValidatedMutations >= limit || nbValidatedCount >= maxPerNotebook) break;
+          if (totalValidatedMutations >= limit && totalNear >= 8 && totalMid >= 8 && totalFar >= 8) break;
+          if (nbValidatedCount >= nbCap) break;
 
           // Lazy scratch creation: duplicate notebook once per source notebook
           if (!scratchDoc) {
@@ -387,7 +411,7 @@ async function main() {
 
             if (mutantResult.error) {
               mutantErrored = true;
-              behavioralDeviation = true; // Runtime crash is a valid, observable bug
+              behavioralDeviation = true;
             } else if (mutantResult.output !== undefined) {
               mutantHash = hashValue(mutantResult.output);
               behavioralDeviation = mutantHash !== baselineHash;
@@ -397,6 +421,8 @@ async function main() {
               const verifiedMutation: Mutation = {
                 ...candidate,
                 stratum,
+                hopDistance: hopInfo.hopDistance,
+                hopBand: hopInfo.hopBand,
                 baselineHash,
                 mutantHash,
                 mutantErrored,
@@ -405,15 +431,20 @@ async function main() {
               appendMutation(mutationsPath, verifiedMutation);
               totalValidatedMutations++;
               nbValidatedCount++;
+              cellValidatedCount++;
               kindStats[candidate.kind].validated++;
               if (stratum === "name-level") totalNameLevel++;
               else totalValueLevel++;
+
+              if (hopInfo.hopBand === "near") totalNear++;
+              else if (hopInfo.hopBand === "mid") totalMid++;
+              else totalFar++;
 
               validatedByNotebook[nb.name] = (validatedByNotebook[nb.name] || 0) + 1;
 
               const errNote = mutantErrored ? " [crashed]" : "";
               console.log(
-                `  ✓ [${candidate.kind} | ${stratum}] ${cell.id}: ${candidate.description}${errNote}`
+                `  ✓ [${candidate.kind} | ${stratum} | hop ${hopInfo.hopDistance} (${hopInfo.hopBand})] ${cell.id}: ${candidate.description}${errNote}`
               );
             } else {
               console.log(
@@ -439,14 +470,21 @@ async function main() {
     totalCandidatesGenerated > 0
       ? ((totalValidatedMutations / totalCandidatesGenerated) * 100).toFixed(2)
       : "0";
+  const distinctNotebooksCount = Object.keys(validatedByNotebook).length;
 
   console.log("\n" + "=".repeat(60));
-  console.log("MUTATION ENGINE SUMMARY (R5.1 Stratified Ground Truth)");
+  console.log("MUTATION ENGINE SUMMARY (R9 Hop-Calibrated Ground Truth)");
   console.log("=".repeat(60));
   console.log(`Candidates generated (Layer 1 syntax): ${totalCandidatesGenerated}`);
   console.log(`Validated mutations (Layer 2 behavior): ${totalValidatedMutations}`);
-  console.log(`  - Value-level stratum:               ${totalValueLevel} (target >= 30)`);
-  console.log(`  - Name-level stratum (control):      ${totalNameLevel} (target <= 20)`);
+  console.log(`Distinct notebooks:                    ${distinctNotebooksCount} (target >= 8)`);
+  console.log(`\nHop Band Distribution:`);
+  console.log(`  - near (hop 1-2):                    ${totalNear} (target >= 8)`);
+  console.log(`  - mid  (hop 3-6):                    ${totalMid} (target >= 8)`);
+  console.log(`  - far  (hop 7+):                     ${totalFar} (target >= 8)`);
+  console.log(`\nStratum Distribution:`);
+  console.log(`  - Value-level stratum:               ${totalValueLevel}`);
+  console.log(`  - Name-level stratum (control):      ${totalNameLevel}`);
   console.log(`Behavioral validation rate:            ${passRate}%`);
   console.log("\nBreakdown by Mutation Kind:");
   for (const [k, stats] of Object.entries(kindStats) as [MutationKind, { generated: number; validated: number }][]) {

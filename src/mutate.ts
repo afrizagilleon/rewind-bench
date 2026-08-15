@@ -1,5 +1,5 @@
 /**
- * Mutation Engine (R5 & R5.1 / Ground Truth)
+ * Mutation Engine (R5 & R5.1 & R9 / Ground Truth)
  *
  * Generates synthetic single-point bugs using acorn AST transformations across 10 kinds:
  * Name-level:
@@ -15,8 +15,11 @@
  * - index-shift
  * - filter-invert
  *
- * Implements two-layer validation (syntax parsing and empirical behavioral deviation)
- * using temporary scratch notebooks (zz-rewind-scratch-*) to protect user data.
+ * R9 Enhancements:
+ * - AST-based cellReads & cellWrites with shorthand support
+ * - computeHopDistances DAG analysis (near: 1-2, mid: 3-6, far: 7+)
+ * - Two-layer validation (syntax parsing and empirical behavioral deviation)
+ * - Safe scratch notebook execution (zz-rewind-scratch-*)
  */
 
 import { parse } from "acorn";
@@ -38,15 +41,24 @@ export type MutationKind =
   | "filter-invert";
 
 export type Stratum = "name-level" | "value-level";
+export type HopBand = "near" | "mid" | "far";
 
 export function stratumForKind(kind: MutationKind): Stratum {
   return kind === "key-rename" ? "name-level" : "value-level";
+}
+
+export function hopBandForDistance(hopDistance: number): HopBand {
+  if (hopDistance <= 2) return "near";
+  if (hopDistance <= 6) return "mid";
+  return "far";
 }
 
 export interface Mutation {
   id: string; // `${cellId}:${kind}:${index}`
   kind: MutationKind;
   stratum?: Stratum;
+  hopDistance?: number;
+  hopBand?: HopBand;
   notebookId: string;
   notebookName: string;
   cellId: string;
@@ -57,6 +69,15 @@ export interface Mutation {
   baselineHash?: string;
   mutantHash?: string;
   mutantErrored?: boolean;
+}
+
+export interface CellHopInfo {
+  cellId: string;
+  hopDistance: number;
+  hopBand: HopBand;
+  readsFromUpstream: boolean;
+  reads: string[];
+  writes: string[];
 }
 
 const KEY_SYNONYMS: Record<string, string> = {
@@ -97,6 +118,145 @@ export function isValidSyntax(code: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * AST-based extraction of variables read from `inputs.foo` or `inputs["foo"]`.
+ */
+export function cellReads(code: string): string[] {
+  const names = new Set<string>();
+  let tree: any;
+  try {
+    tree = parse(wrap(code), { ecmaVersion: "latest", sourceType: "script" });
+  } catch {
+    return [];
+  }
+
+  walkAncestor(tree, {
+    MemberExpression(node: any) {
+      if (node.object?.type === "Identifier" && node.object.name === "inputs") {
+        if (!node.computed && node.property?.type === "Identifier" && node.property.name) {
+          names.add(node.property.name);
+        } else if (node.computed && node.property?.type === "Literal" && typeof node.property.value === "string") {
+          names.add(node.property.value);
+        }
+      }
+    },
+  });
+
+  return Array.from(names);
+}
+
+/**
+ * AST-based extraction of variables written in cell's top-level return object.
+ * Properly recognizes shorthand `return { langkah };` and ignores nested callbacks.
+ */
+export function cellWrites(code: string): string[] {
+  const names = new Set<string>();
+  let tree: any;
+  try {
+    tree = parse(wrap(code), { ecmaVersion: "latest", sourceType: "script" });
+  } catch {
+    return [];
+  }
+
+  const FUNCTIONS = new Set([
+    "FunctionDeclaration",
+    "FunctionExpression",
+    "ArrowFunctionExpression",
+  ]);
+
+  const cellFunctionBody = (tree as any).body[0];
+
+  function extractKeys(expression: any) {
+    if (!expression) return;
+    if (expression.type === "ObjectExpression") {
+      for (const prop of expression.properties || []) {
+        if (prop.type === "Property" && !prop.computed) {
+          if (prop.key?.type === "Identifier") {
+            names.add(prop.key.name);
+          } else if (prop.key?.type === "Literal" && typeof prop.key.value === "string") {
+            names.add(prop.key.value);
+          }
+        }
+      }
+    } else if (expression.type === "ConditionalExpression") {
+      extractKeys(expression.consequent);
+      extractKeys(expression.alternate);
+    } else if (expression.type === "LogicalExpression") {
+      extractKeys(expression.left);
+      extractKeys(expression.right);
+    } else if (expression.type === "AwaitExpression") {
+      extractKeys(expression.argument);
+    }
+  }
+
+  walkAncestor(cellFunctionBody, {
+    ReturnStatement(node: any, ancestors: any[]) {
+      const enclosing = [...ancestors].reverse().find((one) => FUNCTIONS.has(one.type));
+      if (enclosing !== cellFunctionBody) return;
+      extractKeys(node.argument);
+    },
+  });
+
+  return Array.from(names);
+}
+
+/**
+ * Computes hop distances for all cells in a notebook's steps according to DAG dataflow.
+ */
+export function computeHopDistances(steps: any[]): Map<string, CellHopInfo> {
+  const result = new Map<string, CellHopInfo>();
+  const producedVariables = new Map<string, number>();
+
+  function walk(s?: any[]) {
+    for (const step of s ?? []) {
+      if (step.kind === "parallel") {
+        for (const lane of step.lanes ?? []) {
+          walk(lane.steps);
+        }
+        continue;
+      }
+      const code = step.code ?? "";
+      if (code.trim().length === 0) continue;
+
+      const reads = cellReads(code);
+      const writes = cellWrites(code);
+
+      const upstreamHops: number[] = [];
+      for (const r of reads) {
+        if (producedVariables.has(r)) {
+          upstreamHops.push(producedVariables.get(r)!);
+        }
+      }
+
+      let hopDistance = 0;
+      let readsFromUpstream = false;
+
+      if (upstreamHops.length > 0) {
+        readsFromUpstream = true;
+        hopDistance = 1 + Math.max(...upstreamHops);
+      }
+
+      const hopBand = hopBandForDistance(hopDistance);
+
+      result.set(step.id, {
+        cellId: step.id,
+        hopDistance,
+        hopBand,
+        readsFromUpstream,
+        reads,
+        writes,
+      });
+
+      for (const w of writes) {
+        producedVariables.set(w, hopDistance);
+      }
+    }
+  }
+
+  walk(steps);
+  return result;
 }
 
 /**
@@ -143,7 +303,6 @@ export function mutationsFor(
     "filter-invert": 0,
   };
 
-  // Helper to check if node is inside a nested inner function
   function isInsideInnerFunction(ancestors: any[]): boolean {
     for (let i = 2; i < ancestors.length - 1; i++) {
       const a = ancestors[i];
@@ -216,7 +375,7 @@ export function mutationsFor(
       }
     },
 
-    // 2. BinaryExpression: off-by-one, operand-swap, arith-swap, comparison-flip
+    // 2. BinaryExpression: off-by-one, comparison-flip, arith-swap, operand-swap
     BinaryExpression(node: any) {
       const op = node.operator;
       const leftEnd = node.left.end - WRAPPER_OFFSET;
@@ -505,7 +664,7 @@ export function mutationsFor(
     Literal(node: any, ancestors: any[]) {
       const parent = ancestors[ancestors.length - 2];
       if (parent && parent.type === "Property" && parent.key === node && !parent.computed) {
-        return; // Don't mutate object property keys
+        return;
       }
 
       let mutatedVal: string | null = null;

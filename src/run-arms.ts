@@ -1,14 +1,14 @@
 /**
- * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1)
+ * CLI Runner for Arms A/B/C (R6 & R6.1 & R5.1 & R9)
  *
  * Runs Monolithic, Stepwise, and Rewind arms against ground truth mutations.
- * Supplies concrete symptoms (expected vs actual outputs) and full cell sources upfront.
+ * Supplies terminal cell symptom (final expected vs actual output) and all cell sources upfront.
  * Enforces scratch notebook isolation (zz-rewind-arm-<uuid8>) and cleans them up in finally.
  * Saves transcripts to results/transcripts/<arm>-<mutationId>.json and appends records to results/arms.jsonl.
- * Reports summary across three strata: Overall, Name-level (Control), and Value-level (Hypothesis).
+ * Reports summary stratified across hopBands (near, mid, far) and strata (overall, name-level, value-level).
  *
  * Usage:
- *   npm run arms -- --smoke --stratum=value-level # 3 value-level mutations from 3 distinct notebooks
+ *   npm run arms -- --smoke --hop=far             # 3 far-hop (>=7) mutations from 3 distinct notebooks
  *   npm run arms -- --smoke                       # 3 mutations × 3 arms
  *   npm run arms -- --limit=50                    # full benchmark run
  *   npm run arms -- --cleanup                     # remove any orphan zz-rewind-arm-*
@@ -19,7 +19,7 @@ import { runMonolithicArm } from "./arms/monolithic";
 import { runStepwiseArm } from "./arms/stepwise";
 import { runRewindArm } from "./arms/rewind";
 import type { ArmResult, ArmContext } from "./arms/types";
-import { stratumForKind, type Mutation, type Stratum } from "./mutate";
+import { stratumForKind, hopBandForDistance, type Mutation, type Stratum, type HopBand } from "./mutate";
 import { readFileSync, appendFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -166,6 +166,24 @@ function updateCellSourceInDoc(steps: any[], targetCellId: string, newSource: st
   return false;
 }
 
+function getTerminalCellId(steps: any[]): string {
+  let lastCellId = "";
+  function walk(s?: any[]) {
+    for (const step of s ?? []) {
+      if (step.kind === "parallel") {
+        for (const lane of step.lanes ?? []) walk(lane.steps);
+        continue;
+      }
+      const code = step.code ?? "";
+      if (code.trim().length > 0) {
+        lastCellId = step.id;
+      }
+    }
+  }
+  walk(steps);
+  return lastCellId;
+}
+
 function appendArmResult(path: string, result: ArmResult): void {
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(result) + "\n", "utf8");
@@ -179,6 +197,8 @@ function saveTranscript(transcriptsDir: string, arm: string, mutation: Mutation,
     arm: armResult.arm,
     mutationId: armResult.mutationId,
     stratum: armResult.stratum,
+    hopDistance: armResult.hopDistance,
+    hopBand: armResult.hopBand,
     notebookId: mutation.notebookId,
     notebookName: mutation.notebookName,
     model: armResult.model,
@@ -209,6 +229,12 @@ function loadMutations(mutationsPath: string): Mutation[] {
       const m = JSON.parse(line);
       if (!m.stratum) {
         m.stratum = stratumForKind(m.kind);
+      }
+      if (m.hopDistance === undefined) {
+        m.hopDistance = 1;
+      }
+      if (!m.hopBand) {
+        m.hopBand = hopBandForDistance(m.hopDistance);
       }
       mutations.push(m);
     } catch {
@@ -289,6 +315,7 @@ async function main() {
   let limit = isSmoke ? 3 : 50;
   let targetArm: "monolithic" | "stepwise" | "rewind" | null = null;
   let targetStratum: Stratum | null = null;
+  let targetHop: HopBand | null = null;
 
   for (const arg of args) {
     if (arg.startsWith("--limit=")) {
@@ -299,6 +326,9 @@ async function main() {
     }
     if (arg.startsWith("--stratum=")) {
       targetStratum = arg.split("=")[1] as Stratum;
+    }
+    if (arg.startsWith("--hop=")) {
+      targetHop = arg.split("=")[1] as HopBand;
     }
   }
 
@@ -318,8 +348,26 @@ async function main() {
 
   let selectedMutations: Mutation[] = [];
 
-  if (isSmoke && targetStratum === "value-level") {
-    // Pick 3 value-level mutations from 3 distinct notebooks
+  if (isSmoke && targetHop === "far") {
+    // Pick 3 far-hop (hop >= 7) mutations from 3 distinct notebooks
+    const farMutations = mutations.filter((m) => m.hopBand === "far" || (m.hopDistance && m.hopDistance >= 7));
+    const seenNotebooks = new Set<string>();
+    for (const m of farMutations) {
+      if (!seenNotebooks.has(m.notebookId)) {
+        seenNotebooks.add(m.notebookId);
+        selectedMutations.push(m);
+        if (selectedMutations.length >= 3) break;
+      }
+    }
+    if (selectedMutations.length < 3) {
+      for (const m of farMutations) {
+        if (!selectedMutations.includes(m)) {
+          selectedMutations.push(m);
+          if (selectedMutations.length >= 3) break;
+        }
+      }
+    }
+  } else if (isSmoke && targetStratum === "value-level") {
     const valueMutations = mutations.filter((m) => m.stratum === "value-level" || m.kind !== "key-rename");
     const seenNotebooks = new Set<string>();
     for (const m of valueMutations) {
@@ -337,6 +385,8 @@ async function main() {
         }
       }
     }
+  } else if (targetHop) {
+    selectedMutations = mutations.filter((m) => m.hopBand === targetHop).slice(0, limit);
   } else if (targetStratum) {
     selectedMutations = mutations.filter((m) => m.stratum === targetStratum).slice(0, limit);
   } else {
@@ -352,10 +402,13 @@ async function main() {
   const maxTurns = 15;
 
   console.log("=======================================================");
-  console.log("R6.1 & R5.1 — ARMS (A/B/C) EVALUATION BENCHMARK");
+  console.log("R9 — ARMS (A/B/C) EVALUATION BENCHMARK");
   console.log("=======================================================");
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
   console.log(`Target mutants:  ${selectedMutations.length}`);
+  if (targetHop) {
+    console.log(`Target hop band: ${targetHop}`);
+  }
   if (targetStratum) {
     console.log(`Target stratum:  ${targetStratum}`);
   }
@@ -369,30 +422,34 @@ async function main() {
   const results: ArmResult[] = [];
   const completionTokensList: number[] = [];
 
-  const notebookCache: Record<string, { originalDoc: any; baselineRun: any }> = {};
+  const notebookCache: Record<string, { originalDoc: any; baselineRun: any; terminalCellId: string }> = {};
 
   for (let mIdx = 0; mIdx < selectedMutations.length; mIdx++) {
     const mutation = selectedMutations[mIdx];
     const stratum = mutation.stratum || stratumForKind(mutation.kind);
+    const hopDistance = mutation.hopDistance ?? 1;
+    const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+
     console.log(`\n[Mutation ${mIdx + 1}/${selectedMutations.length}] ${mutation.id} (${mutation.notebookName})`);
-    console.log(`  Kind: ${mutation.kind} [${stratum}] | Bug: ${mutation.description}`);
+    console.log(`  Kind: ${mutation.kind} [${stratum}] | Hop: ${hopDistance} (${hopBand}) | Bug: ${mutation.description}`);
 
     if (!notebookCache[mutation.notebookId]) {
       try {
-        const originalDoc = await getNotebook(mutation.notebookId);
-        const baselineRun = await runNotebook(mutation.notebookId);
+        const originalDoc: any = await getNotebook(mutation.notebookId);
+        const baselineRun: any = await runNotebook(mutation.notebookId);
         if (baselineRun.status !== "success") {
           console.log(`  ⚠ Baseline run not successful (${baselineRun.status}), skipping mutation.`);
           continue;
         }
-        notebookCache[mutation.notebookId] = { originalDoc, baselineRun };
+        const terminalCellId = getTerminalCellId(originalDoc.steps);
+        notebookCache[mutation.notebookId] = { originalDoc, baselineRun, terminalCellId };
       } catch (nbErr) {
         console.log(`  ⚠ Failed to prepare notebook ${mutation.notebookName}: ${nbErr}`);
         continue;
       }
     }
 
-    const { originalDoc, baselineRun } = notebookCache[mutation.notebookId];
+    const { originalDoc, baselineRun, terminalCellId } = notebookCache[mutation.notebookId];
 
     for (const arm of armsToRun) {
       let scratchId: string | null = null;
@@ -421,6 +478,7 @@ async function main() {
           originalDoc,
           baselineRun,
           actualRun,
+          terminalCellId,
           saveScratchDoc: async (doc: any) => {
             await saveNotebookDoc(doc);
           },
@@ -468,14 +526,27 @@ async function main() {
     }
   }
 
-  // Summary Metrics — Three Distinct Blocks
+  // Summary Metrics
   console.log("\n" + "=".repeat(65));
-  console.log("R6.1 & R5.1 BENCHMARK SUMMARY REPORT");
+  console.log("R9 BENCHMARK SUMMARY REPORT");
   console.log("=".repeat(65));
 
-  printSummaryBlock("BLOCK 1: OVERALL STRATUM", results, armsToRun);
-  printSummaryBlock("BLOCK 2: NAME-LEVEL STRATUM (Control)", results.filter((r) => r.stratum === "name-level"), armsToRun);
-  printSummaryBlock("BLOCK 3: VALUE-LEVEL STRATUM (Hypothesis)", results.filter((r) => r.stratum === "value-level"), armsToRun);
+  printSummaryBlock("OVERALL RESULTS", results, armsToRun);
+
+  // Breakdown by Hop Band
+  console.log("\n" + "#".repeat(65));
+  console.log("HOP BAND STRATIFICATION (Localization Difficulty)");
+  console.log("#".repeat(65));
+  printSummaryBlock("HOP BAND: NEAR (Hop 1-2)", results.filter((r) => r.hopBand === "near"), armsToRun);
+  printSummaryBlock("HOP BAND: MID  (Hop 3-6)", results.filter((r) => r.hopBand === "mid"), armsToRun);
+  printSummaryBlock("HOP BAND: FAR  (Hop 7+)",  results.filter((r) => r.hopBand === "far"), armsToRun);
+
+  // Breakdown by Stratum
+  console.log("\n" + "#".repeat(65));
+  console.log("MUTATION STRATUM (Value-level vs Name-level)");
+  console.log("#".repeat(65));
+  printSummaryBlock("STRATUM: VALUE-LEVEL (Hypothesis)", results.filter((r) => r.stratum === "value-level"), armsToRun);
+  printSummaryBlock("STRATUM: NAME-LEVEL (Control)", results.filter((r) => r.stratum === "name-level"), armsToRun);
 
   // Completion tokens distribution
   if (completionTokensList.length > 0) {

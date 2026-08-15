@@ -1,8 +1,8 @@
 /**
- * Arm C — Rewind (R6 & R6.1)
+ * Arm C — Rewind (R6 & R6.1 & R9)
  *
  * Interactive multi-turn debugging empowered with Materialized Scope Replay.
- * Receives concrete symptom (expected vs actual outputs) and all cell sources upfront.
+ * Receives terminal cell symptom (final expected vs actual output) and all cell sources upfront.
  * Reading a cell returns both cell source code and the exact recorded upstream scope
  * from the baseline run (scopeBefore).
  * Running a cell automatically injects the materialized scope if input is not provided.
@@ -13,34 +13,35 @@ import { runAgentLoop, type AgentTools } from "../agent";
 import type { ArmContext, ArmResult } from "./types";
 import { hashValue } from "../ledger";
 import { scopeBefore } from "../msr";
+import { hopBandForDistance, stratumForKind } from "../mutate";
 
-function formatSymptom(baselineRun: any, actualRun: any): string {
-  let expectedOutputs: any = baselineRun.outputs;
-  if (!expectedOutputs || Object.keys(expectedOutputs).length === 0) {
-    expectedOutputs = {};
-    for (const [cId, res] of Object.entries(baselineRun.cell_results || {})) {
-      if ((res as any).output !== undefined) expectedOutputs[cId] = (res as any).output;
-    }
+function formatTerminalSymptom(baselineRun: any, actualRun: any, terminalCellId: string): string {
+  const expectedResult = baselineRun.cell_results?.[terminalCellId];
+  const expectedOutput = expectedResult?.output !== undefined
+    ? expectedResult.output
+    : (baselineRun.outputs || null);
+
+  const actualResult = actualRun.cell_results?.[terminalCellId];
+  let actualOutput: any;
+  if (actualResult) {
+    actualOutput = actualResult.output !== undefined
+      ? actualResult.output
+      : (actualResult.error ? { error: actualResult.error } : null);
+  } else if (actualRun.status === "failed") {
+    actualOutput = { error: actualRun.error || "Notebook execution failed before completing" };
+  } else {
+    actualOutput = actualRun.outputs || null;
   }
 
-  let actualOutputs: any = actualRun.outputs;
-  if (!actualOutputs || Object.keys(actualOutputs).length === 0) {
-    actualOutputs = {};
-    for (const [cId, res] of Object.entries(actualRun.cell_results || {})) {
-      if ((res as any).output !== undefined) actualOutputs[cId] = (res as any).output;
-      else if ((res as any).error) actualOutputs[cId] = { error: (res as any).error };
-    }
-  }
-
-  let symptom = `Expected notebook outputs (from baseline run):\n\`\`\`json\n${JSON.stringify(expectedOutputs, null, 2)}\n\`\`\`\n\n`;
-  symptom += `Actual notebook run result (current faulty state):\nStatus: ${actualRun.status}\n`;
+  let symptom = `Expected notebook final output (from terminal cell before the bug):\n\`\`\`json\n${JSON.stringify(expectedOutput, null, 2)}\n\`\`\`\n\n`;
+  symptom += `Actual notebook final output (current faulty state):\nStatus: ${actualRun.status}\n`;
   if (actualRun.error) {
     symptom += `Run error: ${actualRun.error}\n`;
   }
   if (actualRun.errors && Array.isArray(actualRun.errors) && actualRun.errors.length > 0) {
     symptom += `Errors: ${JSON.stringify(actualRun.errors, null, 2)}\n`;
   }
-  symptom += `Actual outputs:\n\`\`\`json\n${JSON.stringify(actualOutputs, null, 2)}\n\`\`\``;
+  symptom += `Output:\n\`\`\`json\n${JSON.stringify(actualOutput, null, 2)}\n\`\`\``;
   return symptom;
 }
 
@@ -122,11 +123,11 @@ function formatScopeWithTruncation(
 }
 
 export async function runRewindArm(ctx: ArmContext): Promise<ArmResult & { messages: any[] }> {
-  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, actualRun, saveScratchDoc, runScratchCell, model, maxTokens, maxTurns } = ctx;
+  const { mutation, scratchNotebookDoc, originalDoc, baselineRun, actualRun, terminalCellId, saveScratchDoc, runScratchCell, model, maxTokens, maxTurns } = ctx;
 
   const systemPrompt = `You are an automated code repair agent for zaatool reactive notebooks with Materialized Scope Replay.
-A notebook previously produced correct outputs but now fails or produces incorrect results.
-You are given the symptom (expected vs actual outputs) and the entire notebook source upfront.
+A notebook previously produced correct outputs but now fails or produces incorrect final outputs.
+You are given the symptom (expected vs actual final output) and the entire notebook source upfront.
 When you read a cell using notebook_read, the recorded upstream state (scopeBefore) from the last good run is provided.
 When you execute a cell using notebook_run_cell without input, that exact recorded upstream scope is automatically supplied.
 
@@ -151,7 +152,7 @@ Available actions (respond with exactly one JSON block):
   const initialUserMessage = `Notebook: "${mutation.notebookName}" (${mutation.notebookId})
 
 === SYMPTOM ===
-${formatSymptom(baselineRun, actualRun)}
+${formatTerminalSymptom(baselineRun, actualRun, terminalCellId)}
 
 === NOTEBOOK SOURCE CELLS ===
 ${formatAllCells(scratchNotebookDoc.steps)}
@@ -209,11 +210,16 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
     resolved = finalHash === mutation.baselineHash;
   }
   const luckyPass = resolved && !summary.editedCells.includes(mutation.cellId);
+  const hopDistance = mutation.hopDistance ?? 1;
+  const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+  const stratum = mutation.stratum ?? stratumForKind(mutation.kind);
 
   return {
     arm: "rewind",
     mutationId: mutation.id,
-    stratum: mutation.stratum || (mutation.kind === "key-rename" ? "name-level" : "value-level"),
+    stratum,
+    hopDistance,
+    hopBand,
     model: model || process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731",
     editedCells: summary.editedCells,
     turns: summary.turns,
