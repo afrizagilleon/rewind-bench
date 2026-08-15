@@ -1,8 +1,9 @@
 /**
- * zaatool REST API Client (R2 / R2.1)
+ * zaatool REST API Client (R2 / R2.1 / R2.2)
  *
  * Handles HTTP communication with the zaatool engine.
- * Uses ZAA_SESSION_TOKEN (JWT) for all REST API endpoints.
+ * Uses ZAA_SESSION_TOKEN (JWT) for all REST API endpoints, with optional
+ * auto-refresh via ZAA_USERNAME and ZAA_PASSWORD when expired (R2.2).
  */
 
 export interface CellResult {
@@ -47,6 +48,15 @@ interface RawNotebookDoc {
   outputs?: Array<string | { name: string; render?: string }>;
 }
 
+let cachedSessionToken: string | null = null;
+
+/**
+ * Resets the in-memory cached session token (useful for testing).
+ */
+export function resetCachedToken(): void {
+  cachedSessionToken = null;
+}
+
 /**
  * Validates and retrieves required environment variables at runtime.
  */
@@ -56,6 +66,16 @@ export function requireEnv(name: string): string {
     throw new Error(`${name} is not set — copy .env.example to .env and fill it in`);
   }
   return v;
+}
+
+/**
+ * Gets the active session token (in-memory refreshed token or from environment).
+ */
+function getSessionToken(): string {
+  if (cachedSessionToken) {
+    return cachedSessionToken;
+  }
+  return requireEnv("ZAA_SESSION_TOKEN");
 }
 
 /**
@@ -107,17 +127,18 @@ function getBaseUrl(): string {
 }
 
 /**
- * HTTP request helper with error handling and retry for network errors.
+ * HTTP request helper with error handling, network error retries, and auto-refresh on 401 (R2.2).
  */
 async function request(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  isRetry = false
 ): Promise<Response> {
   const baseUrl = getBaseUrl();
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const url = `${baseUrl}${normalizedPath}`;
 
-  const sessionToken = requireEnv("ZAA_SESSION_TOKEN");
+  const sessionToken = getSessionToken();
   const defaultHeaders: Record<string, string> = {
     Authorization: `Bearer ${sessionToken}`,
   };
@@ -141,10 +162,50 @@ async function request(
         headers: mergedHeaders,
       });
 
-      // 401 Unauthorized must be fatal with an explicit expiration message
+      // 401 Unauthorized handling (R2.2)
       if (res.status === 401) {
+        const username = process.env.ZAA_USERNAME?.trim();
+        const password = process.env.ZAA_PASSWORD?.trim();
+
+        if (!isRetry && username && password) {
+          // Attempt login without Authorization header
+          const loginUrl = `${baseUrl}/api/auth/login`;
+          let loginRes: Response;
+          try {
+            loginRes = await fetch(loginUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username, password }),
+            });
+          } catch {
+            throw new Error("Authentication failed during auto-refresh: network error");
+          }
+
+          if (loginRes.ok) {
+            const loginData = (await loginRes.json()) as {
+              success?: boolean;
+              token?: string;
+            };
+            if (loginData.token) {
+              cachedSessionToken = loginData.token;
+              // Retry original request exactly once
+              return await request(path, options, true);
+            }
+          }
+
+          // If login failed (e.g. wrong credentials), throw immediately without looping
+          let errorDetail = "invalid credentials";
+          try {
+            const errBody = (await loginRes.json()) as { error?: string } | undefined;
+            if (errBody?.error) errorDetail = errBody.error;
+          } catch {
+            // ignore
+          }
+          throw new Error(`Authentication failed during auto-refresh: ${errorDetail}`);
+        }
+
         throw new Error(
-          "ZAA_SESSION_TOKEN expired — refresh from localStorage.getItem('zaatool_token')"
+          "ZAA_SESSION_TOKEN expired — refresh from localStorage.getItem('zaatool_token') or set ZAA_USERNAME and ZAA_PASSWORD to refresh automatically."
         );
       }
 
@@ -161,11 +222,12 @@ async function request(
 
       return res;
     } catch (err: unknown) {
-      // Do not retry 4xx / fatal HTTP errors or missing env errors
+      // Do not retry 4xx / fatal HTTP errors, missing env errors, or auth failures
       if (
         err instanceof Error &&
-        (err.message.includes("ZAA_SESSION_TOKEN expired") ||
+        (err.message.includes("ZAA_SESSION_TOKEN") ||
           err.message.includes("is not set") ||
+          err.message.includes("Authentication failed") ||
           err.message.startsWith("HTTP "))
       ) {
         throw err;

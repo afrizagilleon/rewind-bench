@@ -11,6 +11,7 @@ import {
   outline,
   outlineOfDocument,
   requireEnv,
+  resetCachedToken,
   type RunDetail,
 } from "../src/client";
 
@@ -112,8 +113,13 @@ describe("R2.1 Client — Execution Order Flattening (outline)", () => {
 describe("R2.1 Client — Configuration Validation", () => {
   const originalEnv = { ...process.env };
 
+  beforeEach(() => {
+    resetCachedToken();
+  });
+
   afterEach(() => {
     process.env = { ...originalEnv };
+    resetCachedToken();
   });
 
   it("requireEnv throws 'is not set' error when env var is missing or empty", () => {
@@ -142,6 +148,7 @@ describe("R2.1 Client — HTTP Endpoints with Stubbed Fetch", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
+    resetCachedToken();
     process.env.ZAA_BASE_URL = "http://localhost:4000";
     process.env.ZAA_SESSION_TOKEN = "test-session-jwt";
   });
@@ -149,6 +156,7 @@ describe("R2.1 Client — HTTP Endpoints with Stubbed Fetch", () => {
   afterEach(() => {
     global.fetch = originalFetch;
     process.env = { ...originalEnv };
+    resetCachedToken();
     vi.restoreAllMocks();
   });
 
@@ -336,22 +344,26 @@ describe("R2.1 Client — HTTP Endpoints with Stubbed Fetch", () => {
   });
 });
 
-describe("R2.1 Client — Auth and Error Handling", () => {
+describe("R2.1 & R2.2 Client — Auth, Auto-Refresh & Error Handling", () => {
   const originalFetch = global.fetch;
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
+    resetCachedToken();
     process.env.ZAA_BASE_URL = "http://localhost:4000";
-    process.env.ZAA_SESSION_TOKEN = "test-session-jwt";
+    process.env.ZAA_SESSION_TOKEN = "initial-session-jwt";
+    delete process.env.ZAA_USERNAME;
+    delete process.env.ZAA_PASSWORD;
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
     process.env = { ...originalEnv };
+    resetCachedToken();
     vi.restoreAllMocks();
   });
 
-  it("401 response throws fatal Error mentioning 'expired'", async () => {
+  it("401 without credentials throws fatal Error mentioning both remedies (R2.2 acceptance)", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -359,10 +371,87 @@ describe("R2.1 Client — Auth and Error Handling", () => {
       text: async () => "Unauthorized",
     } as Response);
 
-    await expect(listNotebooks()).rejects.toThrow(/expired/i);
     await expect(listNotebooks()).rejects.toThrow(
-      "ZAA_SESSION_TOKEN expired — refresh from localStorage.getItem('zaatool_token')"
+      "ZAA_SESSION_TOKEN expired — refresh from localStorage.getItem('zaatool_token') or set ZAA_USERNAME and ZAA_PASSWORD to refresh automatically."
     );
+  });
+
+  it("401 with credentials triggers auto-refresh and succeeds on retry (R2.2 acceptance)", async () => {
+    process.env.ZAA_USERNAME = "my-user";
+    process.env.ZAA_PASSWORD = "my-password";
+
+    let requestCount = 0;
+    global.fetch = vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+      requestCount++;
+      if (url === "http://localhost:4000/api/notebooks") {
+        const authHeader = (opts?.headers as Record<string, string>)?.Authorization;
+        if (authHeader === "Bearer initial-session-jwt") {
+          return {
+            ok: false,
+            status: 401,
+            statusText: "Unauthorized",
+            text: async () => "Unauthorized",
+          } as Response;
+        }
+        if (authHeader === "Bearer refreshed-session-jwt") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [{ id: "nb-1", name: "nb1", runtime: "node" }],
+          } as Response;
+        }
+      }
+      if (url === "http://localhost:4000/api/auth/login") {
+        expect(opts?.headers).not.toHaveProperty("Authorization");
+        const body = JSON.parse((opts?.body as string) || "{}");
+        expect(body).toEqual({ username: "my-user", password: "my-password" });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, token: "refreshed-session-jwt" }),
+        } as Response;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const notebooks = await listNotebooks();
+    expect(notebooks).toHaveLength(1);
+    expect(notebooks[0].id).toBe("nb-1");
+    // Exactly 3 fetch calls: 1st notebooks (401) -> login (200) -> 2nd notebooks retry with new token (200)
+    expect(requestCount).toBe(3);
+  });
+
+  it("wrong credentials throws after one attempt without looping (R2.2 acceptance)", async () => {
+    process.env.ZAA_USERNAME = "wrong-user";
+    process.env.ZAA_PASSWORD = "wrong-password";
+
+    let fetchCount = 0;
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      fetchCount++;
+      if (url === "http://localhost:4000/api/notebooks") {
+        return {
+          ok: false,
+          status: 401,
+          statusText: "Unauthorized",
+          text: async () => "Unauthorized",
+        } as Response;
+      }
+      if (url === "http://localhost:4000/api/auth/login") {
+        return {
+          ok: false,
+          status: 401,
+          statusText: "Unauthorized",
+          json: async () => ({ error: "Invalid username or password" }),
+        } as Response;
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    await expect(listNotebooks()).rejects.toThrow(
+      "Authentication failed during auto-refresh: Invalid username or password"
+    );
+    // Exactly 2 calls: original request + 1 login attempt
+    expect(fetchCount).toBe(2);
   });
 
   it("404 response throws Error rather than returning undefined", async () => {
