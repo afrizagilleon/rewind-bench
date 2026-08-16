@@ -111,6 +111,8 @@ async function deleteNotebook(notebookId: string, name?: string): Promise<void> 
   }
 }
 
+let missingCellRetriesCount = 0;
+
 async function pollRunFinished(
   notebookId: string,
   runId: string,
@@ -126,11 +128,17 @@ async function pollRunFinished(
       const run = (await res.json()) as { status: string; cell_results?: Record<string, any>; error?: string };
       if (run.status !== "running") {
         if (!run.cell_results || Object.keys(run.cell_results).length === 0) {
+          missingCellRetriesCount++;
           await new Promise((resolve) => setTimeout(resolve, 300));
           const retryRes = await apiRequest(
             `/api/notebooks/${encodeURIComponent(notebookId)}/runs/${encodeURIComponent(runId)}`
           );
-          if (retryRes.ok) return await retryRes.json();
+          if (retryRes.ok) {
+            const retryRun = (await retryRes.json()) as any;
+            if (retryRun.cell_results && Object.keys(retryRun.cell_results).length > 0) {
+              return retryRun;
+            }
+          }
         }
         return run;
       }
@@ -168,7 +176,19 @@ async function runCellInScratch(
   }
   const { runId } = (await res.json()) as { runId: string };
   const runDetail = await pollRunFinished(scratchId, runId);
-  const cellResult = runDetail.cell_results?.[cellId];
+  let cellResult = runDetail.cell_results?.[cellId];
+  if (!cellResult && runDetail.status === "success") {
+    missingCellRetriesCount++;
+    console.log(`  ⚠ Missing cell ${cellId} from successful run detail, retrying fetch once...`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const retryRes = await apiRequest(
+      `/api/notebooks/${encodeURIComponent(scratchId)}/runs/${encodeURIComponent(runId)}`
+    );
+    if (retryRes.ok) {
+      const retryDetail = (await retryRes.json()) as any;
+      cellResult = retryDetail.cell_results?.[cellId];
+    }
+  }
   if (cellResult) {
     return {
       output: cellResult.output,
@@ -370,14 +390,22 @@ async function main() {
   const isSmoke = args.includes("--smoke");
   const isDesigned = args.includes("--designed");
   let limit = isSmoke ? 3 : 50;
+  let concurrency = 1;
   let targetArm: "monolithic" | "stepwise" | "rewind" | null = null;
   let targetStratum: Stratum | null = null;
   let targetHop: HopBand | null = null;
   let targetDist: DistBand | null = null;
 
+  let customOutput: string | null = process.env.ARMS_OUTPUT || null;
   for (const arg of args) {
     if (arg.startsWith("--limit=")) {
       limit = parseInt(arg.split("=")[1], 10);
+    }
+    if (arg.startsWith("--concurrency=")) {
+      concurrency = Math.max(1, parseInt(arg.split("=")[1], 10) || 1);
+    }
+    if (arg.startsWith("--output=")) {
+      customOutput = arg.split("=")[1];
     }
     if (arg.startsWith("--arm=")) {
       targetArm = arg.split("=")[1] as "monolithic" | "stepwise" | "rewind";
@@ -397,17 +425,14 @@ async function main() {
   const mutationsPath = isDesigned
     ? join(resultsDir, "mutations-designed.jsonl")
     : join(resultsDir, "mutations.jsonl");
-  const armsPath = isDesigned
-    ? join(resultsDir, "arms-designed.jsonl")
-    : join(resultsDir, "arms.jsonl");
+  const defaultArmsFile = isDesigned
+    ? (process.env.MODEL_PRIMARY && process.env.MODEL_PRIMARY.toLowerCase().includes("glm") ? "arms-designed-glm.jsonl" : "arms-designed.jsonl")
+    : (process.env.MODEL_PRIMARY && process.env.MODEL_PRIMARY.toLowerCase().includes("glm") ? "arms-glm.jsonl" : "arms.jsonl");
+  const armsPath = customOutput ? customOutput : join(resultsDir, defaultArmsFile);
   const transcriptsDir = join(resultsDir, "transcripts");
 
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(transcriptsDir, { recursive: true });
-
-  if (!isSmoke && !args.includes("--append")) {
-    writeFileSync(armsPath, "", "utf8");
-  }
 
   const mutations = loadMutations(mutationsPath);
   if (mutations.length === 0) {
@@ -478,8 +503,18 @@ async function main() {
     : ["monolithic", "stepwise", "rewind"];
 
   const model = process.env.MODEL_PRIMARY || "deepseek-ai/DeepSeek-V4-Flash-0731";
-  const maxTokens = parseInt(process.env.ARM_MAX_TOKENS || "16000", 10);
+  const defaultMaxTokens = (process.env.MODEL_PRIMARY && process.env.MODEL_PRIMARY.toLowerCase().includes("glm")) ? "24000" : "16000";
+  const maxTokens = parseInt(process.env.ARM_MAX_TOKENS || defaultMaxTokens, 10);
   const maxTurns = 15;
+
+  // Initialize main output file and shard files
+  if (!args.includes("--append")) {
+    writeFileSync(armsPath, "", "utf8");
+    for (let w = 0; w < concurrency; w++) {
+      const shardFile = armsPath.replace(/\.jsonl$/, `-${w}.jsonl`);
+      writeFileSync(shardFile, "", "utf8");
+    }
+  }
 
   console.log("=======================================================");
   console.log(
@@ -491,6 +526,7 @@ async function main() {
   console.log(`Mode:            ${isSmoke ? "SMOKE RUN" : "FULL BENCHMARK"}`);
   console.log(`Corpus:          ${isDesigned ? "DESIGNED (results/mutations-designed.jsonl)" : "INCIDENTAL (results/mutations.jsonl)"}`);
   console.log(`Target mutants:  ${selectedMutations.length}`);
+  console.log(`Concurrency:     ${concurrency} worker(s)`);
   if (targetDist) {
     console.log(`Target distBand: ${targetDist}`);
   }
@@ -511,187 +547,226 @@ async function main() {
   const completionTokensList: number[] = [];
   let retriedRunsCount = 0;
   let consecutiveFailures = 0;
+  let circuitBreakerTriggered = false;
 
   const notebookCache: Record<string, { originalDoc: any; baselineRun: any; terminalCellId: string }> = {};
 
-  for (let mIdx = 0; mIdx < selectedMutations.length; mIdx++) {
-    const mutation = selectedMutations[mIdx];
-    const stratum = mutation.stratum || stratumForKind(mutation.kind);
-    const hopDistance = mutation.hopDistance ?? 1;
-    const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
-    const distanceToTerminal = mutation.distanceToTerminal ?? 0;
-    const distBand = mutation.distBand ?? distBandForDistance(distanceToTerminal);
-
-    console.log(`\n[Mutation ${mIdx + 1}/${selectedMutations.length}] ${mutation.id} (${mutation.notebookName})`);
-    console.log(`  Kind: ${mutation.kind} [${stratum}] | Dist to terminal: ${distanceToTerminal} (${distBand}) | Hop: ${hopDistance} (${hopBand}) | Bug: ${mutation.description}`);
-
+  async function getCachedNotebook(mutation: Mutation) {
     if (!notebookCache[mutation.notebookId]) {
+      const originalDoc: any = await getNotebook(mutation.notebookId);
+      const baselineRun: any = await runNotebook(mutation.notebookId);
+      if (baselineRun.status !== "success") {
+        throw new Error(`Baseline run not successful (${baselineRun.status})`);
+      }
+      const terminalCellId = getTerminalCellId(originalDoc.steps);
+      notebookCache[mutation.notebookId] = { originalDoc, baselineRun, terminalCellId };
+    }
+    return notebookCache[mutation.notebookId];
+  }
+
+  let nextMutationIndex = 0;
+
+  async function worker(workerId: number) {
+    const shardFile = armsPath.replace(/\.jsonl$/, `-${workerId}.jsonl`);
+
+    while (true) {
+      if (circuitBreakerTriggered) break;
+      const mIdx = nextMutationIndex++;
+      if (mIdx >= selectedMutations.length) break;
+
+      const mutation = selectedMutations[mIdx];
+      const stratum = mutation.stratum || stratumForKind(mutation.kind);
+      const hopDistance = mutation.hopDistance ?? 1;
+      const hopBand = mutation.hopBand ?? hopBandForDistance(hopDistance);
+      const distanceToTerminal = mutation.distanceToTerminal ?? 0;
+      const distBand = mutation.distBand ?? distBandForDistance(distanceToTerminal);
+
+      console.log(`\n[W${workerId}] [Mutation ${mIdx + 1}/${selectedMutations.length}] ${mutation.id} (${mutation.notebookName})`);
+      console.log(`  Kind: ${mutation.kind} [${stratum}] | Dist to terminal: ${distanceToTerminal} (${distBand}) | Hop: ${hopDistance} (${hopBand}) | Bug: ${mutation.description}`);
+
+      let cached;
       try {
-        const originalDoc: any = await getNotebook(mutation.notebookId);
-        const baselineRun: any = await runNotebook(mutation.notebookId);
-        if (baselineRun.status !== "success") {
-          console.log(`  ⚠ Baseline run not successful (${baselineRun.status}), skipping mutation.`);
-          continue;
-        }
-        const terminalCellId = getTerminalCellId(originalDoc.steps);
-        notebookCache[mutation.notebookId] = { originalDoc, baselineRun, terminalCellId };
+        cached = await getCachedNotebook(mutation);
       } catch (nbErr) {
-        console.log(`  ⚠ Failed to prepare notebook ${mutation.notebookName}: ${nbErr}`);
+        console.log(`  ⚠ [W${workerId}] Failed to prepare notebook ${mutation.notebookName}: ${nbErr}`);
         continue;
       }
-    }
 
-    const { originalDoc, baselineRun, terminalCellId } = notebookCache[mutation.notebookId];
+      const { originalDoc, baselineRun, terminalCellId } = cached;
 
-    for (const arm of armsToRun) {
-      let armAttempts = 0;
-      let armSuccess = false;
+      for (const arm of armsToRun) {
+        if (circuitBreakerTriggered) break;
 
-      while (armAttempts < 2 && !armSuccess) {
-        armAttempts++;
-        let scratchId: string | null = null;
-        let scratchName = "";
+        let armAttempts = 0;
+        let armSuccess = false;
 
-        try {
-          // 1. Duplicate notebook
-          const dup = await duplicateNotebook(mutation.notebookId);
-          scratchId = dup.id;
-          const scratchDoc: any = await getNotebook(scratchId);
-          const uuid8 = randomUUID().slice(0, 8);
-          scratchName = `zz-rewind-arm-${uuid8}`;
-          scratchDoc.name = scratchName;
+        while (armAttempts < 2 && !armSuccess) {
+          armAttempts++;
+          let scratchId: string | null = null;
+          let scratchName = "";
 
-          // 2. Inject mutated code into scratch notebook & save
-          updateCellSourceInDoc(scratchDoc.steps, mutation.cellId, mutation.mutatedSource);
-          await saveNotebookDoc(scratchDoc);
+          try {
+            // 1. Duplicate notebook
+            const dup = await duplicateNotebook(mutation.notebookId);
+            scratchId = dup.id;
+            const scratchDoc: any = await getNotebook(scratchId);
+            const uuid8 = randomUUID().slice(0, 8);
+            scratchName = `zz-rewind-arm-${uuid8}`;
+            scratchDoc.name = scratchName;
 
-          // 3. Execute mutated notebook ONCE to obtain concrete symptom
-          const actualRun = await runScratchNotebookFull(scratchId);
+            // 2. Inject mutated code into scratch notebook & save
+            updateCellSourceInDoc(scratchDoc.steps, mutation.cellId, mutation.mutatedSource);
+            await saveNotebookDoc(scratchDoc);
 
-          // 4. Build arm context
-          const ctx: ArmContext = {
-            mutation,
-            scratchNotebookDoc: scratchDoc,
-            originalDoc,
-            baselineRun,
-            actualRun,
-            terminalCellId,
-            saveScratchDoc: async (doc: any) => {
-              await saveNotebookDoc(doc);
-            },
-            runScratchCell: async (cellId: string, input?: Record<string, unknown>) => {
-              return await runCellInScratch(scratchId!, cellId, input);
-            },
-            model,
-            maxTokens,
-            maxTurns,
-          };
+            // 3. Execute mutated notebook ONCE to obtain concrete symptom
+            const actualRun = await runScratchNotebookFull(scratchId);
 
-          // 5. Run arm
-          let armExecutionResult: ArmResult & { messages: any[] };
-          if (arm === "monolithic") {
-            armExecutionResult = await runMonolithicArm(ctx);
-          } else if (arm === "stepwise") {
-            armExecutionResult = await runStepwiseArm(ctx);
-          } else {
-            armExecutionResult = await runRewindArm(ctx);
-          }
+            // 4. Build arm context
+            const ctx: ArmContext = {
+              mutation,
+              scratchNotebookDoc: scratchDoc,
+              originalDoc,
+              baselineRun,
+              actualRun,
+              terminalCellId,
+              saveScratchDoc: async (doc: any) => {
+                await saveNotebookDoc(doc);
+              },
+              runScratchCell: async (cellId: string, input?: Record<string, unknown>) => {
+                return await runCellInScratch(scratchId!, cellId, input);
+              },
+              model,
+              maxTokens,
+              maxTurns,
+            };
 
-          const { messages, ...armResult } = armExecutionResult;
+            // 5. Run arm
+            let armExecutionResult: ArmResult & { messages: any[] };
+            if (arm === "monolithic") {
+              armExecutionResult = await runMonolithicArm(ctx);
+            } else if (arm === "stepwise") {
+              armExecutionResult = await runStepwiseArm(ctx);
+            } else {
+              armExecutionResult = await runRewindArm(ctx);
+            }
 
-          // 6. Held-out Lucky-Pass Check (R7.0)
-          let luckyPass: boolean | null = null;
-          let heldOutHash: string | undefined = undefined;
+            const { messages, ...armResult } = armExecutionResult;
 
-          if (isDesigned && mutation.notebookName.startsWith("rb-designed-")) {
-            const heldoutFixturePath = join(process.cwd(), "fixtures", "designed", `${mutation.notebookName}.heldout.json`);
-            if (existsSync(heldoutFixturePath)) {
-              try {
-                const heldoutDoc = JSON.parse(readFileSync(heldoutFixturePath, "utf8"));
-                const heldoutSeedCode = heldoutDoc.steps?.[0]?.code;
-                const heldOutTruthHash = heldoutDoc.heldOutTruthHash;
+            // 6. Held-out Lucky-Pass Check (R7.0)
+            let luckyPass: boolean | null = null;
+            let heldOutHash: string | undefined = undefined;
 
-                if (heldoutSeedCode && heldOutTruthHash) {
-                  // In the repaired scratchDoc, replace the first step's code with heldout seed
-                  scratchDoc.steps[0].code = heldoutSeedCode;
-                  await saveNotebookDoc(scratchDoc);
+            if (isDesigned && mutation.notebookName.startsWith("rb-designed-")) {
+              const heldoutFixturePath = join(process.cwd(), "fixtures", "designed", `${mutation.notebookName}.heldout.json`);
+              if (existsSync(heldoutFixturePath)) {
+                try {
+                  const heldoutDoc = JSON.parse(readFileSync(heldoutFixturePath, "utf8"));
+                  const heldoutSeedCode = heldoutDoc.steps?.[0]?.code;
+                  const heldOutTruthHash = heldoutDoc.heldOutTruthHash;
 
-                  const heldoutRun = await runScratchNotebookFull(scratchId!);
-                  const heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+                  if (heldoutSeedCode && heldOutTruthHash) {
+                    scratchDoc.steps[0].code = heldoutSeedCode;
+                    await saveNotebookDoc(scratchDoc);
 
-                  if (!heldoutRun.error && heldoutOutput !== undefined) {
-                    heldOutHash = hashValue(heldoutOutput);
-                    luckyPass = armResult.resolved && (heldOutHash !== heldOutTruthHash);
-                  } else {
-                    heldOutHash = "ERROR";
-                    luckyPass = armResult.resolved && true;
+                    let heldoutRun = await runScratchNotebookFull(scratchId!);
+                    let heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+
+                    if (heldoutRun.status === "success" && heldoutOutput === undefined) {
+                      missingCellRetriesCount++;
+                      console.log(`  ⚠ [W${workerId}] Missing terminal cell from heldout run, retrying fetch once...`);
+                      await new Promise((resolve) => setTimeout(resolve, 300));
+                      heldoutRun = await runScratchNotebookFull(scratchId!);
+                      heldoutOutput = heldoutRun.cell_results?.[terminalCellId]?.output;
+                    }
+
+                    if (!heldoutRun.error && heldoutOutput !== undefined) {
+                      heldOutHash = hashValue(heldoutOutput);
+                      luckyPass = armResult.resolved && (heldOutHash !== heldOutTruthHash);
+                    } else {
+                      heldOutHash = "ERROR";
+                      luckyPass = armResult.resolved && true;
+                    }
                   }
+                } catch (heldoutErr) {
+                  console.log(`  ⚠ [W${workerId}] Held-out check error: ${heldoutErr}`);
                 }
-              } catch (heldoutErr) {
-                console.log(`  ⚠ Held-out check error: ${heldoutErr}`);
               }
+            }
+
+            armResult.luckyPass = luckyPass;
+            armResult.heldOutHash = heldOutHash;
+
+            results.push(armResult);
+            appendArmResult(shardFile, armResult);
+            saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
+
+            const completionTokens = armResult.reasoningTokens + armResult.answerTokens;
+            completionTokensList.push(completionTokens);
+
+            const resIcon = armResult.resolved ? "✓ RESOLVED" : "✗ UNRESOLVED";
+            const lucky = armResult.luckyPass === true ? " [LUCKY PASS (held-out fail)]" : "";
+            const offTarget = armResult.offTargetFix ? " [OFF-TARGET FIX]" : "";
+            const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
+            const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
+            const heldoutNote = heldOutHash ? ` | heldOutHash: ${heldOutHash.slice(0, 8)}...` : "";
+            console.log(
+              `  -> [W${workerId}] Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${offTarget}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens}${heldoutNote} | ${armResult.wallMs}ms`
+            );
+
+            armSuccess = true;
+            if (armResult.protocolFailure) {
+              consecutiveFailures++;
+            } else {
+              consecutiveFailures = 0;
+            }
+          } catch (armErr) {
+            if (armAttempts < 2) {
+              retriedRunsCount++;
+              console.log(`  ⚠ [W${workerId}] Arm ${arm} encountered transport/execution error: ${armErr}. Retrying run (attempt ${armAttempts + 1}/2)...`);
+              await new Promise((res) => setTimeout(res, 2000));
+            } else {
+              consecutiveFailures++;
+              console.log(`  ✗ [W${workerId}] Arm ${arm} failed after retry: ${armErr}`);
+            }
+          } finally {
+            if (scratchId) {
+              await deleteNotebook(scratchId, scratchName);
             }
           }
 
-          armResult.luckyPass = luckyPass;
-          armResult.heldOutHash = heldOutHash;
-
-          results.push(armResult);
-          appendArmResult(armsPath, armResult);
-          saveTranscript(transcriptsDir, arm, mutation, armResult, messages);
-
-          const completionTokens = armResult.reasoningTokens + armResult.answerTokens;
-          completionTokensList.push(completionTokens);
-
-          const resIcon = armResult.resolved ? "✓ RESOLVED" : "✗ UNRESOLVED";
-          const lucky = armResult.luckyPass === true ? " [LUCKY PASS (held-out fail)]" : "";
-          const offTarget = armResult.offTargetFix ? " [OFF-TARGET FIX]" : "";
-          const protoFail = armResult.protocolFailure ? " [PROTOCOL FAIL]" : "";
-          const lenFail = armResult.lengthFailure ? " [LENGTH FAIL]" : "";
-          const heldoutNote = heldOutHash ? ` | heldOutHash: ${heldOutHash.slice(0, 8)}...` : "";
-          console.log(
-            `  -> Arm ${arm.padEnd(10)}: ${resIcon}${lucky}${offTarget}${protoFail}${lenFail} [${armResult.stopReason}] | turns: ${armResult.turns} | tokens: prompt=${armResult.promptTokens}, reasoning=${armResult.reasoningTokens}, ans=${armResult.answerTokens}${heldoutNote} | ${armResult.wallMs}ms`
-          );
-
-          armSuccess = true;
-          if (armResult.protocolFailure) {
-            consecutiveFailures++;
-          } else {
-            consecutiveFailures = 0;
-          }
-        } catch (armErr) {
-          if (armAttempts < 2) {
-            retriedRunsCount++;
-            console.log(`  ⚠ Arm ${arm} encountered transport/execution error: ${armErr}. Retrying run (attempt ${armAttempts + 1}/2)...`);
-            await new Promise((res) => setTimeout(res, 2000));
-          } else {
-            consecutiveFailures++;
-            console.log(`  ✗ Arm ${arm} failed after retry: ${armErr}`);
-          }
-        } finally {
-          if (scratchId) {
-            await deleteNotebook(scratchId, scratchName);
+          if (consecutiveFailures >= 3) {
+            circuitBreakerTriggered = true;
+            console.error("\n" + "!".repeat(65));
+            console.error("⚠ CIRCUIT BREAKER HALT: 3 consecutive systemic failures encountered.");
+            console.error("Stopping benchmark to prevent API credit exhaustion.");
+            console.error("!".repeat(65) + "\n");
+            break;
           }
         }
-
-        if (consecutiveFailures >= 3) {
-          console.error("\n" + "!".repeat(65));
-          console.error("⚠ CIRCUIT BREAKER HALT: 3 consecutive systemic failures encountered.");
-          console.error("Stopping benchmark to prevent API credit exhaustion.");
-          console.error("!".repeat(65) + "\n");
-          break;
-        }
       }
-
-      if (consecutiveFailures >= 3) {
-        break;
-      }
-    }
-
-    if (consecutiveFailures >= 3) {
-      break;
     }
   }
+
+  // Launch workers
+  const workerPromises: Promise<void>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    workerPromises.push(worker(w));
+  }
+  await Promise.all(workerPromises);
+
+  // Merge shard files into main armsPath
+  console.log("\nMerging shard files into main arms output...");
+  writeFileSync(armsPath, "", "utf8");
+  for (let w = 0; w < concurrency; w++) {
+    const shardFile = armsPath.replace(/\.jsonl$/, `-${w}.jsonl`);
+    if (existsSync(shardFile)) {
+      const content = readFileSync(shardFile, "utf8");
+      if (content.trim()) {
+        appendFileSync(armsPath, content.trim() + "\n", "utf8");
+      }
+    }
+  }
+  console.log(`Merged results written to ${armsPath}`);
 
   // Summary Metrics
   console.log("\n" + "=".repeat(65));
@@ -701,6 +776,7 @@ async function main() {
       : "R9 BENCHMARK SUMMARY REPORT"
   );
   console.log("=".repeat(65));
+  console.log(`Total missing-cell retries (engine race mitigation): ${missingCellRetriesCount}`);
   if (retriedRunsCount > 0) {
     console.log(`Total transport/execution retried runs: ${retriedRunsCount}`);
   }

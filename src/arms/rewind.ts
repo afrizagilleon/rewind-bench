@@ -13,7 +13,7 @@ import { runAgentLoop, type AgentTools } from "../agent";
 import type { ArmContext, ArmResult } from "./types";
 import { hashValue } from "../ledger";
 import { scopeBefore } from "../msr";
-import { hopBandForDistance, stratumForKind } from "../mutate";
+import { hopBandForDistance, distBandForDistance, stratumForKind } from "../mutate";
 
 function formatTerminalSymptom(baselineRun: any, actualRun: any, terminalCellId: string): string {
   const expectedResult = baselineRun.cell_results?.[terminalCellId];

@@ -306,6 +306,7 @@ async function main() {
     long: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
     short: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
     direct: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
+    unknown: { count: 0, notebooks: new Set<string>(), operators: new Set<MutationKind>() },
   };
 
   const hopStats: Record<HopBand, { count: number; notebooks: Set<string> }> = {

@@ -42,6 +42,7 @@ export type MutationKind =
 
 export type Stratum = "name-level" | "value-level";
 export type HopBand = "near" | "mid" | "far";
+export type DistBand = "direct" | "short" | "long" | "unknown";
 
 export function stratumForKind(kind: MutationKind): Stratum {
   return kind === "key-rename" ? "name-level" : "value-level";

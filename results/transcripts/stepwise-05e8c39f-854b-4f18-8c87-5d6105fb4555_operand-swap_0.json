@@ -8,8 +8,8 @@
   "hopBand": "far",
   "notebookId": "5177d40e-0eda-4f4d-81c2-48b260c5feda",
   "notebookName": "rb-designed-task-scheduling",
-  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-  "turns": 2,
+  "model": "zai-org/GLM-5.2",
+  "turns": 4,
   "stopReason": "finished",
   "resolved": true,
   "luckyPass": false,
@@ -18,12 +18,12 @@
   "editedCells": [
     "05e8c39f-854b-4f18-8c87-5d6105fb4555"
   ],
-  "wallMs": 27978,
+  "wallMs": 90487,
   "tokens": {
-    "promptTokens": 4015,
-    "reasoningTokens": 2242,
-    "answerTokens": 649,
-    "totalTokens": 6906
+    "promptTokens": 9439,
+    "reasoningTokens": 396,
+    "answerTokens": 1378,
+    "totalTokens": 11213
   },
   "messages": [
     {
@@ -36,15 +36,31 @@
     },
     {
       "role": "assistant",
-      "content": "{\n  \"action\": \"notebook_edit_cell\",\n  \"cell\": \"05e8c39f-854b-4f18-8c87-5d6105fb4555\",\n  \"code\": \"const tasks = inputs.bufferedSchedule;\\nlet totalWorkHours = 0;\\nlet totalBuffer = 0;\\nlet criticalCount = 0;\\nlet maxFinish = 0;\\n\\nfor (const t of tasks) {\\n  totalWorkHours += t.duration;\\n  totalBuffer += t.bufferHours;\\n  if (t.isCritical) criticalCount++;\\n  const adjustedFinish = t.estFinish + t.bufferHours;\\n  if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\\n}\\n\\nconst efficiency = Math.round((totalWorkHours / (maxFinish || 1)) * 1000) / 10;\\n\\nreturn {\\n  taskCount: tasks.length,\\n  criticalTaskCount: criticalCount,\\n  nominalMakespanHours: maxFinish,\\n  totalBufferHoursAllocated: totalBuffer,\\n  pipelineEfficiencyPct: efficiency,\\n  schedulingViable: maxFinish <= 60 && criticalCount >= 2,\\n};\"\n}"
+      "content": "Looking at the final cell, I can see the bug. The `maxFinish` calculation uses the wrong comparison direction:\n\n```javascript\nif (maxFinish > adjustedFinish) maxFinish = adjustedFinish;\n```\n\nSince `maxFinish` starts at 0, the condition `0 > adjustedFinish` (where adjustedFinish is positive) is never true, so `maxFinish` stays at 0. This explains `nominalMakespanHours: 0` and the inflated efficiency (44/0.1*100 = 44000... actually 44/1*100 = 4400).\n\nThe fix is to find the maximum, not minimum:\n```javascript\nif (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\n```\n\nLet me verify the expected math: totalWorkHours = 4+6+3+8+5+2+7+4+5 = 44, and 44/31*100 = 141.9 ✓\n\nLet me apply the fix.</think>```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"05e8c39f-854b-4f18-8c87-5d6105fb4555\", \"code\": \"const tasks = inputs.bufferedSchedule;\\nlet totalWorkHours = 0;\\nlet totalBuffer = 0;\\nlet criticalCount = 0;\\nlet maxFinish = 0;\\n\\nfor (const t of tasks) {\\n  totalWorkHours += t.duration;\\n  totalBuffer += t.bufferHours;\\n  if (t.isCritical) criticalCount++;\\n  const adjustedFinish = t.estFinish + t.bufferHours;\\n  if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\\n}\\n\\nconst efficiency = Math.round((totalWorkHours / (maxFinish || 1)) * 1000) / 10;\\n\\nreturn {\\n  taskCount: tasks.length,\\n  criticalTaskCount: criticalCount,\\n  nominalMakespanHours: maxFinish,\\n  totalBufferHoursAllocated: totalBuffer,\\n  pipelineEfficiencyPct: efficiency,\\n  schedulingViable: maxFinish <= 60 && criticalCount >= 2,\\n};\"}\n```"
     },
     {
       "role": "user",
-      "content": "Turn 2 of 15.\n\nCell 05e8c39f-854b-4f18-8c87-5d6105fb4555 updated successfully."
+      "content": "Turn 2 of 15.\nInvalid format. You must respond with EXACTLY ONE fenced JSON code block:\n```json\n{\"action\": \"...\"}\n```"
     },
     {
       "role": "assistant",
-      "content": "{\n  \"action\": \"finish\",\n  \"reason\": \"Fixed the condition in the final aggregation cell: changed 'if (maxFinish > adjustedFinish) maxFinish = adjustedFinish;' to 'if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;' so that the maximum adjusted finish time is correctly computed, yielding nominalMakespanHours=31 and pipelineEfficiencyPct=141.9.\"\n}"
+      "content": "```json\n{\"action\": \"notebook_edit_cell\", \"cell\": \"05e8c39f-854b-4f18-8c87-5d6105fb4555\", \"code\": \"const tasks = inputs.bufferedSchedule;\\nlet totalWorkHours = 0;\\nlet totalBuffer = 0;\\nlet criticalCount = 0;\\nlet maxFinish = 0;\\n\\nfor (const t of tasks) {\\n  totalWorkHours += t.duration;\\n  totalBuffer += t.bufferHours;\\n  if (t.isCritical) criticalCount++;\\n  const adjustedFinish = t.estFinish + t.bufferHours;\\n  if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;\\n}\\n\\nconst efficiency = Math.round((totalWorkHours / (maxFinish || 1)) * 1000) / 10;\\n\\nreturn {\\n  taskCount: tasks.length,\\n  criticalTaskCount: criticalCount,\\n  nominalMakespanHours: maxFinish,\\n  totalBufferHoursAllocated: totalBuffer,\\n  pipelineEfficiencyPct: efficiency,\\n  schedulingViable: maxFinish <= 60 && criticalCount >= 2,\\n};\"}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 3 of 15.\n\nCell 05e8c39f-854b-4f18-8c87-5d6105fb4555 updated successfully."
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"notebook_run_cell\", \"cell\": \"05e8c39f-854b-4f18-8c87-5d6105fb4555\", \"input\": {\"bufferedSchedule\": [{\"id\":\"T1\",\"duration\":4,\"priority\":1,\"ramMb\":512,\"isCritical\":true,\"estStart\":0,\"estFinish\":4,\"workerSlot\":1,\"bufferedDuration\":5,\"bufferHours\":1},{\"id\":\"T2\",\"duration\":6,\"priority\":2,\"ramMb\":1024,\"isCritical\":true,\"estStart\":4,\"estFinish\":10,\"workerSlot\":1,\"bufferedDuration\":8,\"bufferHours\":2},{\"id\":\"T3\",\"duration\":3,\"priority\":1,\"ramMb\":256,\"isCritical\":false,\"estStart\":4,\"estFinish\":7,\"workerSlot\":1,\"bufferedDuration\":3,\"bufferHours\":0},{\"id\":\"T4\",\"duration\":8,\"priority\":3,\"ramMb\":2048,\"isCritical\":true,\"estStart\":10,\"estFinish\":18,\"workerSlot\":3,\"bufferedDuration\":10,\"bufferHours\":2},{\"id\":\"T5\",\"duration\":5,\"priority\":2,\"ramMb\":512,\"isCritical\":false,\"estStart\":10,\"estFinish\":15,\"workerSlot\":1,\"bufferedDuration\":5,\"bufferHours\":0},{\"id\":\"T6\",\"duration\":2,\"priority\":1,\"ramMb\":256,\"isCritical\":false,\"estStart\":7,\"estFinish\":9,\"workerSlot\":1,\"bufferedDuration\":2,\"bufferHours\":0},{\"id\":\"T7\",\"duration\":7,\"priority\":3,\"ramMb\":1024,\"isCritical\":true,\"estStart\":18,\"estFinish\":25,\"workerSlot\":3,\"bufferedDuration\":9,\"bufferHours\":2},{\"id\":\"T8\",\"duration\":4,\"priority\":2,\"ramMb\":512,\"isCritical\":false,\"estStart\":15,\"estFinish\":19,\"workerSlot\":1,\"bufferedDuration\":4,\"bufferHours\":0},{\"id\":\"T9\",\"duration\":5,\"priority\":3,\"ramMb\":1024,\"isCritical\":true,\"estStart\":25,\"estFinish\":30,\"workerSlot\":3,\"bufferedDuration\":6,\"bufferHours\":1}]}}\n```"
+    },
+    {
+      "role": "user",
+      "content": "Turn 4 of 15.\n\nCell output:\n{\n  \"taskCount\": 9,\n  \"schedulingViable\": true,\n  \"criticalTaskCount\": 5,\n  \"nominalMakespanHours\": 31,\n  \"pipelineEfficiencyPct\": 141.9,\n  \"totalBufferHoursAllocated\": 8\n}"
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\"action\": \"finish\", \"reason\": \"Fixed the maxFinish calculation in the final summary cell. The original code used `if (maxFinish > adjustedFinish) maxFinish = adjustedFinish;` which incorrectly tracked the minimum finish time (and never updated from 0), resulting in nominalMakespanHours=0 and an inflated efficiency. Changed the comparison to `if (adjustedFinish > maxFinish) maxFinish = adjustedFinish;` to correctly compute the maximum adjusted finish time, yielding the expected makespan of 31 hours and pipeline efficiency of 141.9%.\"}\n```"
     }
   ]
 }
