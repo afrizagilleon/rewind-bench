@@ -1,13 +1,13 @@
 /**
- * RewindBench — Interactive Video Demo Runner (R11 & R11.1)
+ * RewindBench — Interactive Video Demo Runner (R11, R11.1, R11.2, R11.3)
  *
  * Demonstrates interactive debugging and held-out verification live on camera.
  * Uses a single PERSISTENT notebook named "rewind-demo" (rb-designed-risk-assessment).
  *
  * Commands:
- *   npm run demo -- --step=1   Restore to ground truth, execute, print final score
- *   npm run demo -- --step=2   Inject bug 95afd5ff (comparison-flip), execute, verify symptom visibility
- *   npm run demo -- --step=3   Run Rewind Arm with 1.5s delay before edits (camera-friendly 1-line logs)
+ *   npm run demo -- --step=1   Restore to ground truth, execute, deploy, print score & markdown summary
+ *   npm run demo -- --step=2   Inject bug 95afd5ff (comparison-flip), execute, deploy, verify symptom
+ *   npm run demo -- --step=3   Run Rewind Arm with 1.5s delay before edits (camera-friendly 1-line logs) & deploy
  *   npm run demo -- --step=4   Install held-out seed, execute, check truth hash, print PASSED / FAILED
  */
 
@@ -83,6 +83,48 @@ const MUTATED_CAPACITY_CODE = `const capacityProfiles = inputs.ltvProfiles.map((
 });
 return { capacityProfiles };`;
 
+/**
+ * Terminal cell ground-truth code with dynamic markdown summary (R11.2)
+ */
+const GROUND_TRUTH_TERMINAL_CODE = `const portfolio = inputs.riskScores;
+let approvedCount = 0;
+let committedCapital = 0;
+let totalLossProvision = 0;
+
+for (const p of portfolio) {
+  if (p.approved) {
+    approvedCount++;
+    committedCapital += p.loanAmount;
+    totalLossProvision += p.expectedLoss;
+  }
+}
+
+const lossProvisionRatioPct = Math.round((totalLossProvision / (committedCapital || 1)) * 10000) / 100;
+totalLossProvision = Math.round(totalLossProvision * 100) / 100;
+const totalApplicants = portfolio.length;
+const portfolioStatus = approvedCount >= 4 ? 'HEALTHY' : 'CONSTRAINED';
+
+return {
+  totalApplicants,
+  approvedCount,
+  committedCapital,
+  totalLossProvision,
+  lossProvisionRatioPct,
+  portfolioStatus,
+  summary: [
+    \`# $\${totalLossProvision.toLocaleString('en-US')}\`,
+    '',
+    \`**Total loss provision** · \${approvedCount} of \${totalApplicants} approved\`,
+    '',
+    \`Portfolio status: \${portfolioStatus} · ratio \${lossProvisionRatioPct}%\`,
+  ].join('\\n'),
+};`;
+
+/**
+ * Page declaration outputs for Apps (R11.3)
+ */
+const DEMO_OUTPUTS = [{ name: "summary", render: "markdown" }];
+
 let cachedSessionToken: string | null = null;
 
 function getAuthHeaders(): Record<string, string> {
@@ -139,6 +181,27 @@ async function saveNotebookDoc(doc: any): Promise<any> {
   return await res.json();
 }
 
+/**
+ * Deploys the notebook to Apps serving (R11.3)
+ */
+async function deployNotebook(notebookId: string): Promise<any> {
+  const res = await apiRequest(`/api/notebooks/${encodeURIComponent(notebookId)}/deploy`, {
+    method: "POST",
+  });
+  return await res.json();
+}
+
+/**
+ * Verifies deploy status and page declaration (R11.3)
+ */
+async function verifyDeployStatus(notebookId: string): Promise<{ hasPage: boolean; hasUndeployedChanges: boolean }> {
+  const res = await apiRequest(`/api/notebooks/${encodeURIComponent(notebookId)}/deploy`);
+  const data = (await res.json()) as any;
+  const hasPage = Boolean(data.hasPage || data.serving?.hasPage);
+  const hasUndeployedChanges = Boolean(data.hasUndeployedChanges);
+  return { hasPage, hasUndeployedChanges };
+}
+
 function loadFixtureDoc(): any {
   if (!existsSync(FIXTURE_PATH)) {
     throw new Error(`Fixture file not found: ${FIXTURE_PATH}`);
@@ -162,18 +225,23 @@ async function ensurePersistentDemoNotebook(): Promise<{ id: string; doc: any }>
 
   if (existing) {
     const doc = (await getNotebook(existing.id)) as any;
+    doc.outputs = DEMO_OUTPUTS;
     return { id: existing.id, doc };
   }
 
-  // Create new persistent notebook
+  // Create new persistent notebook with page declaration (R11.3)
   const fixture = loadFixtureDoc();
   const newDoc = {
     name: DEMO_NOTEBOOK_NAME,
     runtime: "javascript",
     steps: fixture.steps,
+    outputs: DEMO_OUTPUTS,
   };
+  const cell6 = newDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (cell6) cell6.code = GROUND_TRUTH_TERMINAL_CODE;
 
   const saved = await saveNotebookDoc(newDoc);
+  await deployNotebook(saved.id);
   return { id: saved.id, doc: saved };
 }
 
@@ -216,18 +284,19 @@ function formatScopeWithTruncation(
 // ==========================================
 async function runStep1(): Promise<void> {
   console.log("================================================================================");
-  console.log("  REWIND DEMO [STEP 1]: Restore Ground Truth State");
+  console.log("  REWIND DEMO [STEP 1]: Restore Ground Truth State & Deploy");
   console.log("================================================================================");
 
   const { id: demoId } = await ensurePersistentDemoNotebook();
   const fixture = loadFixtureDoc();
 
-  // Reset steps to baseline fixture
+  // Reset steps to baseline fixture + page declaration (R11.3)
   const baselineDoc = {
     id: demoId,
     name: DEMO_NOTEBOOK_NAME,
     runtime: "javascript",
     steps: fixture.steps,
+    outputs: DEMO_OUTPUTS,
   };
 
   // Ensure step 0 uses normal baseline seed (APP-01 .. APP-08)
@@ -245,6 +314,12 @@ async function runStep1(): Promise<void> {
     cell4.code = `const historyScores = inputs.capacityProfiles.map((a) => {\n  let penalty = a.missedPayments * 22;\n  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);\n  let baseScore = 75 - penalty + bonus;\n  if (baseScore > 100) baseScore = 100;\n  if (baseScore < 0) baseScore = 0;\n  return {\n    ...a,\n    creditBehaviorScore: Math.round(baseScore * 100) / 100,\n  };\n});\nreturn { historyScores };`;
   }
 
+  // Ensure terminal cell (06af996f) has markdown summary
+  const cell6 = baselineDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (cell6) {
+    cell6.code = GROUND_TRUTH_TERMINAL_CODE;
+  }
+
   await saveNotebookDoc(baselineDoc);
   console.log(`✓ Notebook "${DEMO_NOTEBOOK_NAME}" (${demoId}) synced to ground truth`);
 
@@ -258,6 +333,16 @@ async function runStep1(): Promise<void> {
     return;
   }
 
+  // Deploy notebook to update Apps page (R11.3)
+  console.log("⏳ Deploying to Apps serving...");
+  await deployNotebook(demoId);
+  const deployStatus = await verifyDeployStatus(demoId);
+
+  if (!deployStatus.hasPage || deployStatus.hasUndeployedChanges) {
+    throw new Error(`Deployment verification failed: hasPage=${deployStatus.hasPage}, hasUndeployedChanges=${deployStatus.hasUndeployedChanges}`);
+  }
+  console.log(`✓ Deployed to Apps: hasPage=${deployStatus.hasPage}, hasUndeployedChanges=${deployStatus.hasUndeployedChanges}`);
+
   const hash = hashValue(terminalOut);
 
   console.log("\n--- TERMINAL CELL OUTPUT SUMMARY (PORTFOLIO SCORE) ---");
@@ -268,6 +353,11 @@ async function runStep1(): Promise<void> {
   console.log(`  Total Loss Provision : $${terminalOut.totalLossProvision?.toLocaleString()}`);
   console.log(`  Loss Provision Ratio : ${terminalOut.lossProvisionRatioPct}%`);
   console.log(`  Output Hash (Truth)  : ${hash}`);
+
+  if (terminalOut.summary) {
+    console.log("\n--- TERMINAL CELL MARKDOWN SUMMARY (APPS PAGE VIEW) ---");
+    console.log(terminalOut.summary);
+  }
   console.log("--------------------------------------------------------------------------------\n");
 }
 
@@ -276,7 +366,7 @@ async function runStep1(): Promise<void> {
 // ==========================================
 async function runStep2(): Promise<void> {
   console.log("================================================================================");
-  console.log("  REWIND DEMO [STEP 2]: Inject Mutation 95afd5ff (comparison-flip)");
+  console.log("  REWIND DEMO [STEP 2]: Inject Mutation 95afd5ff & Deploy");
   console.log("================================================================================");
 
   const { id: demoId } = await ensurePersistentDemoNotebook();
@@ -289,22 +379,31 @@ async function runStep2(): Promise<void> {
     name: DEMO_NOTEBOOK_NAME,
     runtime: "javascript",
     steps: fixture.steps,
+    outputs: DEMO_OUTPUTS,
   };
   baselineDoc.steps[0].code = BASELINE_SEED_CODE;
   const gtCell3 = baselineDoc.steps.find((s: any) => s.id === MUTATED_CELL_ID);
   if (gtCell3) gtCell3.code = GROUND_TRUTH_CAPACITY_CODE;
+  const gtCell6 = baselineDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (gtCell6) gtCell6.code = GROUND_TRUTH_TERMINAL_CODE;
+
   await saveNotebookDoc(baselineDoc);
   const baselineRun = await runNotebook(demoId);
   const baselineOut = baselineRun.cell_results?.[TERMINAL_CELL_ID]?.output as Record<string, any> | undefined;
   const baselineHash = baselineOut ? hashValue(baselineOut) : "NONE";
 
-  // 2. Inject bug 95afd5ff (capacityProfiles comparison flip)
+  // 2. Inject bug 95afd5ff (capacityProfiles comparison flip) + maintain page declaration (R11.3)
+  currentDoc.outputs = DEMO_OUTPUTS;
   currentDoc.steps[0].code = BASELINE_SEED_CODE;
   const cell3 = currentDoc.steps.find((s: any) => s.id === MUTATED_CELL_ID);
   if (!cell3) {
     throw new Error(`Target mutated cell ${MUTATED_CELL_ID} not found in notebook.`);
   }
   cell3.code = MUTATED_CAPACITY_CODE;
+
+  // Ensure terminal cell has summary
+  const cell6 = currentDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (cell6) cell6.code = GROUND_TRUTH_TERMINAL_CODE;
 
   await saveNotebookDoc(currentDoc);
   console.log(`✓ Mutation injected into cell 95afd5ff (capacityProfiles): flipped '>' to '<'`);
@@ -323,6 +422,16 @@ async function runStep2(): Promise<void> {
     throw new Error("Demo invariant violated: Mutation is invisible at the terminal cell.");
   }
 
+  // 5. Deploy mutated notebook to update Apps page (R11.3)
+  console.log("⏳ Deploying mutated state to Apps serving...");
+  await deployNotebook(demoId);
+  const deployStatus = await verifyDeployStatus(demoId);
+
+  if (!deployStatus.hasPage || deployStatus.hasUndeployedChanges) {
+    throw new Error(`Deployment verification failed: hasPage=${deployStatus.hasPage}, hasUndeployedChanges=${deployStatus.hasUndeployedChanges}`);
+  }
+  console.log(`✓ Deployed to Apps: hasPage=${deployStatus.hasPage}, hasUndeployedChanges=${deployStatus.hasUndeployedChanges}`);
+
   console.log("\n--- TERMINAL CELL OUTPUT: BASELINE VS MUTATED STATE ---");
   console.log(`  Execution Status     : ${mutantRun.status.toUpperCase()}`);
   console.log(`  Total Loss Provision : $${baselineOut?.totalLossProvision} (Correct) -> $${mutantOut?.totalLossProvision} (Faulty)`);
@@ -330,6 +439,11 @@ async function runStep2(): Promise<void> {
   console.log(`  Baseline Hash        : ${baselineHash}`);
   console.log(`  Mutant Hash          : ${mutantHash}`);
   console.log(`  Symptom Status       : ✓ VISIBLE DISTORTION DETECTED AT TERMINAL CELL`);
+
+  if (mutantOut?.summary) {
+    console.log("\n--- MUTATED TERMINAL CELL MARKDOWN SUMMARY (APPS PAGE VIEW) ---");
+    console.log(mutantOut.summary);
+  }
   console.log("--------------------------------------------------------------------------------\n");
 }
 
@@ -338,7 +452,7 @@ async function runStep2(): Promise<void> {
 // ==========================================
 async function runStep3(seed = 42, customModel?: string): Promise<void> {
   console.log("================================================================================");
-  console.log("  REWIND DEMO [STEP 3]: Execute Rewind Agent (Materialized Scope Replay)");
+  console.log("  REWIND DEMO [STEP 3]: Execute Rewind Agent (Materialized Scope Replay) & Deploy");
   console.log("================================================================================");
 
   const apiKey = requireEnv("FEATHERLESS_API_KEY");
@@ -354,22 +468,28 @@ async function runStep3(seed = 42, customModel?: string): Promise<void> {
   console.log(`Target Notebook     : "${DEMO_NOTEBOOK_NAME}" (${demoId})`);
   console.log("--------------------------------------------------------------------------------");
 
-  // 1. Get baseline run and actual run
+  // 1. Get baseline run and actual run + maintain page declaration (R11.3)
   const baselineDoc = {
     id: demoId,
     name: DEMO_NOTEBOOK_NAME,
     runtime: "javascript",
     steps: fixture.steps,
+    outputs: DEMO_OUTPUTS,
   };
   baselineDoc.steps[0].code = BASELINE_SEED_CODE;
   const bCell3 = baselineDoc.steps.find((s: any) => s.id === MUTATED_CELL_ID);
   if (bCell3) bCell3.code = GROUND_TRUTH_CAPACITY_CODE;
+  const bCell6 = baselineDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (bCell6) bCell6.code = GROUND_TRUTH_TERMINAL_CODE;
 
   // Save baseline doc temporarily to run baseline, then restore faulty
   const currentFaultyDoc = (await getNotebook(demoId)) as any;
+  currentFaultyDoc.outputs = DEMO_OUTPUTS;
   currentFaultyDoc.steps[0].code = BASELINE_SEED_CODE;
   const fCell3 = currentFaultyDoc.steps.find((s: any) => s.id === MUTATED_CELL_ID);
   if (fCell3) fCell3.code = MUTATED_CAPACITY_CODE;
+  const fCell6 = currentFaultyDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (fCell6) fCell6.code = GROUND_TRUTH_TERMINAL_CODE;
 
   await saveNotebookDoc(baselineDoc);
   const baselineRun = await runNotebook(demoId);
@@ -558,7 +678,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
       const shortId = cellId.slice(0, 8);
       const name = CELL_NAMES[cellId] || "unknown";
 
-      console.log(`${turnHeader} EDIT     │ Cell: ${shortId} (${name}) [1.5s delay -> UI Sync]`);
+      console.log(`${turnHeader} EDIT     │ Cell: ${shortId} (${name}) [1.5s delay -> UI Sync & Deploy]`);
 
       // PAUSE 1.5 seconds so camera captures live state transition in browser
       await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -566,9 +686,11 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
       const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
       if (targetStep) {
         targetStep.code = code;
+        currentFaultyDoc.outputs = DEMO_OUTPUTS;
         await saveNotebookDoc(currentFaultyDoc);
+        await deployNotebook(demoId);
         if (!editedCells.includes(cellId)) editedCells.push(cellId);
-        messages.push({ role: "user", content: `${nextTurnHeader}Cell ${cellId} updated successfully.` });
+        messages.push({ role: "user", content: `${nextTurnHeader}Cell ${cellId} updated and deployed successfully.` });
       } else {
         messages.push({ role: "user", content: `${nextTurnHeader}Error: cell ${cellId} not found.` });
       }
@@ -584,8 +706,11 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
 
   const wallMs = Date.now() - startTime;
 
-  // Run final notebook to verify visible fix
+  // Run final notebook to verify visible fix & deploy final version (R11.3)
   const finalRun = await runNotebook(demoId);
+  await deployNotebook(demoId);
+  const deployStatus = await verifyDeployStatus(demoId);
+
   const finalOutput = finalRun.cell_results?.[TERMINAL_CELL_ID]?.output;
   const finalHash = finalOutput ? hashValue(finalOutput) : "ERROR";
   const visibleResolved = finalHash === baselineTruthHash;
@@ -595,6 +720,7 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
   console.log(`Token Consumption : ${totalTokens.toLocaleString()} (P:${totalPromptTokens.toLocaleString()}, R:${totalReasoningTokens.toLocaleString()}, A:${totalAnswerTokens.toLocaleString()})`);
   console.log(`Terminal Output   : Hash ${finalHash}`);
   console.log(`Visible Result    : ${visibleResolved ? "✓ REPAIRED (Assertions Satisfied)" : "✗ FAILED (Assertion Mismatch)"}`);
+  console.log(`Apps Deployment   : hasPage=${deployStatus.hasPage}, hasUndeployedChanges=${deployStatus.hasUndeployedChanges}`);
   console.log("--------------------------------------------------------------------------------\n");
 }
 
@@ -611,14 +737,38 @@ async function runStep4(): Promise<void> {
   const currentDoc = (await getNotebook(demoId)) as any;
 
   const heldoutSeedCode = heldoutFixture.heldoutSeedCode || heldoutFixture.steps?.[0]?.code;
-  const heldOutTruthHash = heldoutFixture.heldOutTruthHash;
 
-  if (!heldoutSeedCode || !heldOutTruthHash) {
-    throw new Error("Held-out fixture is missing heldoutSeedCode or heldOutTruthHash.");
+  if (!heldoutSeedCode) {
+    throw new Error("Held-out fixture is missing heldoutSeedCode.");
   }
 
-  console.log(`1. Injecting held-out input seed (APP-H101 .. APP-H110)...`);
+  // 1. Calculate held-out truth hash dynamically using ground truth pipeline with heldout seed (R11.3)
+  const fixture = loadFixtureDoc();
+  const gtHeldoutDoc = {
+    id: demoId,
+    name: DEMO_NOTEBOOK_NAME,
+    runtime: "javascript",
+    steps: fixture.steps,
+    outputs: DEMO_OUTPUTS,
+  };
+  gtHeldoutDoc.steps[0].code = heldoutSeedCode;
+  const gtCell3 = gtHeldoutDoc.steps.find((s: any) => s.id === MUTATED_CELL_ID);
+  if (gtCell3) gtCell3.code = GROUND_TRUTH_CAPACITY_CODE;
+  const gtCell6 = gtHeldoutDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (gtCell6) gtCell6.code = GROUND_TRUTH_TERMINAL_CODE;
+
+  await saveNotebookDoc(gtHeldoutDoc);
+  const gtHeldoutRun = await runNotebook(demoId);
+  const gtTerminalOut = gtHeldoutRun.cell_results?.[TERMINAL_CELL_ID]?.output;
+  const heldOutTruthHash = gtTerminalOut ? hashValue(gtTerminalOut) : "ERROR_TRUTH";
+
+  // 2. Install heldout seed on the current state of rewind-demo (which has the bug or agent fix)
   currentDoc.steps[0].code = heldoutSeedCode;
+  currentDoc.outputs = DEMO_OUTPUTS;
+  const cCell6 = currentDoc.steps.find((s: any) => s.id === TERMINAL_CELL_ID);
+  if (cCell6) cCell6.code = GROUND_TRUTH_TERMINAL_CODE;
+
+  console.log(`1. Injecting held-out input seed (APP-H101 .. APP-H110)...`);
   await saveNotebookDoc(currentDoc);
 
   console.log(`2. Executing reactive pipeline on unseen held-out data...`);
