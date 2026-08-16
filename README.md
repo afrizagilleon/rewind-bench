@@ -94,7 +94,7 @@ cp .env.example .env    # then fill it in — see below
 npm run typecheck && npm test
 ```
 
-`npm run test:unit` runs **113 tests** and needs no credentials and no running engine — start there to confirm the install. `npm test` adds the integration suite, which does need a live zaatool.
+`npm run test:unit` runs **120 tests** and needs no credentials and no running engine — start there to confirm the install. `npm test` adds the integration suite, which does need a live zaatool.
 
 ### Filling in `.env`
 
