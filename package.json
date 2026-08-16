@@ -13,6 +13,7 @@
     "metrics": "tsx --env-file-if-exists=.env src/metrics.ts",
     "report": "tsx --env-file-if-exists=.env src/report.ts",
     "demo": "tsx --env-file-if-exists=.env src/run-demo.ts",
+    "audit:symptoms": "tsx --env-file-if-exists=.env src/audit-symptoms.ts",
     "test": "node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run",
     "test:unit": "vitest run test/client.unit.test.ts test/ledger.test.ts test/msr.test.ts test/determinism.test.ts test/mutate.test.ts test/agent.test.ts test/metrics.test.ts test/report.test.ts test/demo.test.ts",
     "typecheck": "tsc --noEmit"
