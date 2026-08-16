@@ -563,145 +563,192 @@ Investigate the cells and their upstream state, locate the bug, repair it with n
   const editedCells: string[] = [];
   let finishReason = "";
 
+function getAvailableCellIds(steps: any[]): string[] {
+  const ids: string[] = [];
+  function walk(s?: any[]) {
+    for (const step of s ?? []) {
+      if (step.kind === "parallel") {
+        for (const lane of step.lanes ?? []) walk(lane.steps);
+        continue;
+      }
+      if (step.id) ids.push(step.id);
+    }
+  }
+  walk(steps);
+  return ids;
+}
+
   const startTime = Date.now();
+  const availableIds = getAvailableCellIds(currentFaultyDoc.steps);
 
-  for (let turn = 1; turn <= maxTurns; turn++) {
-    const turnHeader = `[Turn ${String(turn).padStart(2, " ")}/${maxTurns}]`;
+  try {
+    for (let turn = 1; turn <= maxTurns; turn++) {
+      const turnHeader = `[Turn ${String(turn).padStart(2, " ")}/${maxTurns}]`;
 
-    const reqBody = {
-      model,
-      messages,
-      max_tokens: maxTokens,
-      temperature: 0,
-      seed,
-      reasoning_effort: "low",
-    };
+      const reqBody = {
+        model,
+        messages,
+        max_tokens: maxTokens,
+        temperature: 0,
+        seed,
+        reasoning_effort: "low",
+      };
 
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(reqBody),
-    });
-
-    if (!res.ok) {
-      console.log(`${turnHeader} HTTP Error ${res.status} from model API.`);
-      break;
-    }
-
-    const data = (await res.json()) as any;
-    const choice = data.choices?.[0];
-    const content = choice?.message?.content || "";
-    const reasoning = choice?.message?.reasoning || "";
-
-    const pTokens = data.usage?.prompt_tokens || 0;
-    const cTokens = data.usage?.completion_tokens || 0;
-    let rTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
-    if (rTokens === undefined) {
-      rTokens = reasoning.length > 0 ? Math.min(cTokens, Math.max(1, Math.round(reasoning.length / 3.8))) : 0;
-    }
-    const aTokens = Math.max(0, cTokens - rTokens);
-
-    totalPromptTokens += pTokens;
-    totalReasoningTokens += rTokens;
-    totalAnswerTokens += aTokens;
-    totalTokens += (data.usage?.total_tokens || (pTokens + cTokens));
-
-    messages.push({ role: "assistant", content });
-
-    const action = parseModelAction(content);
-    if (!action) {
-      console.log(`${turnHeader} Invalid format. Requesting retry...`);
-      messages.push({
-        role: "user",
-        content: `Turn ${turn + 1} of ${maxTurns}.\nInvalid format. You must respond with EXACTLY ONE fenced JSON code block:\n\`\`\`json\n{"action": "..."}\n\`\`\``,
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(reqBody),
       });
-      continue;
-    }
 
-    const nextTurnHeader = turn < maxTurns ? `Turn ${turn + 1} of ${maxTurns}.\n\n` : "";
-
-    // 1. FINISH
-    if (action.action === "finish") {
-      finishReason = String(action.reason || "Repair completed");
-      const shortReason = finishReason.length > 45 ? `${finishReason.slice(0, 42)}...` : finishReason;
-      console.log(`${turnHeader} FINISH   │ Reason: ${shortReason}`);
-      break;
-    }
-
-    // 2. NOTEBOOK_READ
-    if (action.action === "notebook_read") {
-      const cellId = String(action.cell || "");
-      const shortId = cellId.slice(0, 8);
-      const name = CELL_NAMES[cellId] || "unknown";
-      console.log(`${turnHeader} READ     │ Cell: ${shortId} (${name}) + MSR Scope`);
-
-      const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
-      const code = targetStep?.code || "";
-      const scopeResult = scopeBefore(baselineDoc, baselineRun, cellId);
-      const { formatted, truncated } = formatScopeWithTruncation(scopeResult.scope);
-
-      messages.push({
-        role: "user",
-        content: `${nextTurnHeader}Cell ${cellId} source:\n\`\`\`javascript\n${code}\n\`\`\`\n\nUpstream state at this cell (recorded from the last good run):\n\`\`\`json\n${formatted}\n\`\`\``,
-      });
-      continue;
-    }
-
-    // 3. NOTEBOOK_RUN_CELL
-    if (action.action === "notebook_run_cell") {
-      const cellId = String(action.cell || "");
-      const shortId = cellId.slice(0, 8);
-      const name = CELL_NAMES[cellId] || "unknown";
-      console.log(`${turnHeader} EXECUTE  │ Cell: ${shortId} (${name}) [Scope Auto-Injected]`);
-
-      let input = action.input;
-      if (!input || Object.keys(input).length === 0) {
-        const scopeResult = scopeBefore(baselineDoc, baselineRun, cellId);
-        input = scopeResult.scope;
+      if (!res.ok) {
+        console.log(`${turnHeader} HTTP Error ${res.status} from model API.`);
+        break;
       }
 
-      const runRes = await runCell(demoId, cellId, input as Record<string, unknown>);
-      const resText = runRes.error
-        ? `Cell execution failed:\n${runRes.error}`
-        : `Cell output:\n${JSON.stringify(runRes.output, null, 2)}`;
-      messages.push({ role: "user", content: `${nextTurnHeader}${resText}` });
-      continue;
-    }
+      const data = (await res.json()) as any;
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content || "";
+      const reasoning = choice?.message?.reasoning || "";
 
-    // 4. NOTEBOOK_EDIT_CELL
-    if (action.action === "notebook_edit_cell") {
-      const cellId = String(action.cell || "");
-      const code = String(action.code || "");
-      const shortId = cellId.slice(0, 8);
-      const name = CELL_NAMES[cellId] || "unknown";
+      const pTokens = data.usage?.prompt_tokens || 0;
+      const cTokens = data.usage?.completion_tokens || 0;
+      let rTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
+      if (rTokens === undefined) {
+        rTokens = reasoning.length > 0 ? Math.min(cTokens, Math.max(1, Math.round(reasoning.length / 3.8))) : 0;
+      }
+      const aTokens = Math.max(0, cTokens - rTokens);
 
-      console.log(`${turnHeader} EDIT     │ Cell: ${shortId} (${name}) [1.5s delay -> UI Sync & Deploy]`);
+      totalPromptTokens += pTokens;
+      totalReasoningTokens += rTokens;
+      totalAnswerTokens += aTokens;
+      totalTokens += (data.usage?.total_tokens || (pTokens + cTokens));
 
-      // PAUSE 1.5 seconds so camera captures live state transition in browser
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      messages.push({ role: "assistant", content });
 
-      const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
-      if (targetStep) {
+      const action = parseModelAction(content);
+      if (!action) {
+        console.log(`${turnHeader} Invalid format. Requesting retry...`);
+        messages.push({
+          role: "user",
+          content: `Turn ${turn + 1} of ${maxTurns}.\nInvalid format. You must respond with EXACTLY ONE fenced JSON code block:\n\`\`\`json\n{"action": "..."}\n\`\`\``,
+        });
+        continue;
+      }
+
+      const nextTurnHeader = turn < maxTurns ? `Turn ${turn + 1} of ${maxTurns}.\n\n` : "";
+
+      // 1. FINISH
+      if (action.action === "finish") {
+        finishReason = String(action.reason || "Repair completed");
+        const shortReason = finishReason.length > 45 ? `${finishReason.slice(0, 42)}...` : finishReason;
+        console.log(`${turnHeader} FINISH   │ Reason: ${shortReason}`);
+        break;
+      }
+
+      // 2. NOTEBOOK_READ
+      if (action.action === "notebook_read") {
+        const cellId = String(action.cell || "");
+        const shortId = cellId.slice(0, 8);
+        const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
+
+        if (!targetStep) {
+          console.log(`${turnHeader} READ     │ Cell: ${shortId} (NOT FOUND - agent hallucinated)`);
+          messages.push({
+            role: "user",
+            content: `${nextTurnHeader}Error: Cell "${cellId}" not found. Available cells: ${availableIds.map((id) => id.slice(0, 8)).join(", ")}`,
+          });
+          continue;
+        }
+
+        const name = CELL_NAMES[cellId] || "unknown";
+        console.log(`${turnHeader} READ     │ Cell: ${shortId} (${name}) + MSR Scope`);
+
+        const code = targetStep.code || "";
+        const scopeResult = scopeBefore(baselineDoc, baselineRun, cellId);
+        const { formatted, truncated } = formatScopeWithTruncation(scopeResult.scope);
+
+        messages.push({
+          role: "user",
+          content: `${nextTurnHeader}Cell ${cellId} source:\n\`\`\`javascript\n${code}\n\`\`\`\n\nUpstream state at this cell (recorded from the last good run):\n\`\`\`json\n${formatted}\n\`\`\``,
+        });
+        continue;
+      }
+
+      // 3. NOTEBOOK_RUN_CELL
+      if (action.action === "notebook_run_cell") {
+        const cellId = String(action.cell || "");
+        const shortId = cellId.slice(0, 8);
+        const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
+
+        if (!targetStep) {
+          console.log(`${turnHeader} EXECUTE  │ Cell: ${shortId} (NOT FOUND - agent hallucinated)`);
+          messages.push({
+            role: "user",
+            content: `${nextTurnHeader}Error: Cell "${cellId}" not found. Available cells: ${availableIds.map((id) => id.slice(0, 8)).join(", ")}`,
+          });
+          continue;
+        }
+
+        const name = CELL_NAMES[cellId] || "unknown";
+        console.log(`${turnHeader} EXECUTE  │ Cell: ${shortId} (${name}) [Scope Auto-Injected]`);
+
+        let input = action.input;
+        if (!input || Object.keys(input).length === 0) {
+          const scopeResult = scopeBefore(baselineDoc, baselineRun, cellId);
+          input = scopeResult.scope;
+        }
+
+        const runRes = await runCell(demoId, cellId, input as Record<string, unknown>);
+        const resText = runRes.error
+          ? `Cell execution failed:\n${runRes.error}`
+          : `Cell output:\n${JSON.stringify(runRes.output, null, 2)}`;
+        messages.push({ role: "user", content: `${nextTurnHeader}${resText}` });
+        continue;
+      }
+
+      // 4. NOTEBOOK_EDIT_CELL
+      if (action.action === "notebook_edit_cell") {
+        const cellId = String(action.cell || "");
+        const code = String(action.code || "");
+        const shortId = cellId.slice(0, 8);
+        const targetStep = currentFaultyDoc.steps.find((s: any) => s.id === cellId);
+
+        if (!targetStep) {
+          console.log(`${turnHeader} EDIT     │ Cell: ${shortId} (NOT FOUND - agent hallucinated)`);
+          messages.push({
+            role: "user",
+            content: `${nextTurnHeader}Error: Cell "${cellId}" not found. Available cells: ${availableIds.map((id) => id.slice(0, 8)).join(", ")}`,
+          });
+          continue;
+        }
+
+        const name = CELL_NAMES[cellId] || "unknown";
+        console.log(`${turnHeader} EDIT     │ Cell: ${shortId} (${name}) [1.5s delay -> UI Sync & Deploy]`);
+
+        // PAUSE 1.5 seconds so camera captures live state transition in browser
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
         targetStep.code = code;
         currentFaultyDoc.outputs = DEMO_OUTPUTS;
         await saveNotebookDoc(currentFaultyDoc);
         await deployNotebook(demoId);
         if (!editedCells.includes(cellId)) editedCells.push(cellId);
         messages.push({ role: "user", content: `${nextTurnHeader}Cell ${cellId} updated and deployed successfully.` });
-      } else {
-        messages.push({ role: "user", content: `${nextTurnHeader}Error: cell ${cellId} not found.` });
+        continue;
       }
-      continue;
-    }
 
-    // Unknown
-    messages.push({
-      role: "user",
-      content: `${nextTurnHeader}Unknown action "${action.action}".`,
-    });
+      // Unknown
+      messages.push({
+        role: "user",
+        content: `${nextTurnHeader}Unknown action "${action.action}".`,
+      });
+    }
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.log(`[Turn --/15] ERROR    │ Unexpected failure: ${errorMsg}`);
   }
 
   const wallMs = Date.now() - startTime;

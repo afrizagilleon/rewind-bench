@@ -32,4 +32,24 @@ describe("run-demo.ts structure and integrity", () => {
     expect(existsSync(armsPath)).toBe(true);
     expect(existsSync(metricsPath)).toBe(true);
   });
+
+  it("handles hallucinated / non-existent cell IDs gracefully without throwing", () => {
+    const fixturePath = join(process.cwd(), "fixtures", "designed", "rb-designed-risk-assessment.json");
+    const doc = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const steps = doc.steps;
+
+    const availableIds: string[] = steps.map((s: any) => s.id);
+    const hallucinatedId = "b143f174-8e7c-455c-984b-efff641fbf35"; // 1 char diff from real b143f174-8e7c-455e-...
+
+    const targetStep = steps.find((s: any) => s.id === hallucinatedId);
+    expect(targetStep).toBeUndefined();
+
+    const shortId = hallucinatedId.slice(0, 8);
+    const logLine = `[Turn  1/15] READ     │ Cell: ${shortId} (NOT FOUND - agent hallucinated)`;
+    expect(logLine).toContain("NOT FOUND - agent hallucinated");
+
+    const replyMsg = `Error: Cell "${hallucinatedId}" not found. Available cells: ${availableIds.map((id) => id.slice(0, 8)).join(", ")}`;
+    expect(replyMsg).toContain("Error: Cell");
+    expect(replyMsg).toContain("Available cells");
+  });
 });
