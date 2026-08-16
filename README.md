@@ -183,7 +183,14 @@ Stated here rather than buried, because each of these is a real bound on the cla
 - **Notebook size.** The largest notebook in either corpus is 21 cells; the designed ones are 6–9. Everything fits in a prompt — which is exactly the regime where an agent that reads everything should win, and it does. Nothing here speaks to notebooks that don't fit.
 - **Statistical power.** n = 30 and n = 39. No accuracy difference reaches significance, and none is claimed.
 - **Held-out coverage.** Lucky passes are only measurable on the designed corpus, whose seeds we control. The found corpus reports `n/a` for that metric — not zero.
-- **Symptom scope.** The symptom shown to the agent is the terminal cell's output, but mutation validity and `resolved` compare the whole run's hash. A mutation can therefore pass validation while producing no symptom the agent can observe. This affects all three arms identically, so paired comparisons stand, but absolute solve rates are understated. Audited in `results/symptom-audit.json`.
+- **Some bugs have no symptom.** The symptom shown to the agent is the terminal cell's output, but a mutation only had to change the *whole run's* hash to enter the corpus. Those are not the same scope, so a bug can be valid and still be invisible from where the agent is standing. Audited in `results/symptom-audit.json`: **5 of 30 designed and 11 of 39 found mutations produce no observable symptom.** This hits all three arms identically, so the paired comparisons stand — but the raw totals understate every arm. Restricted to bugs that were actually observable, the found corpus reads:
+
+  | | A · monolithic | B · stepwise | C · rewind |
+  |---|---|---|---|
+  | observable bugs (28) | 25 (89%) | 26 (93%) | 25 (89%) |
+  | unobservable bugs (11) | 2 | 2 | 4 |
+
+  The 69–74% headline is the two rows added together, and it mostly measures how often an agent guesses right with nothing to go on.
 - **The found corpus is not a sample in its deep bands.** Its `mid` and `far` hop bands come entirely from one notebook, which is a repeated template — treat those rows as a case study.
 
 ## Corpora
