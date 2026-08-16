@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rewind-Bench — results</title>
+<meta name="description" content="A repair can match the recorded output and still be wrong. Results from 297 AI code-repair episodes.">
+<style>@font-face{font-family:'Martian Mono';src:local('Martian Mono')}
+@font-face{font-family:'Public Sans';src:local('Public Sans')}
+
+:root{
+  --paper:#F7F9FB; --ink:#131A1C; --ink-2:#3F4B56; --ink-3:#6E7C88;
+  --rule:#D3DCE3; --panel:#FFFFFF;
+  --accent:#0B5F55; --flag:#A33F1E;
+  --grid:rgba(11,95,85,.055);
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:'Public Sans',ui-sans-serif,system-ui,sans-serif;
+  font-size:16px; line-height:1.6;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:56rem; margin:0 auto; padding:0 1.5rem 6rem}
+
+/* Chart paper, only behind the opening. A readout is printed on a grid.
+   The fade lives on a pseudo-element: masking .hero itself would fade the
+   numbers too, and data you cannot read is worse than no grid at all. */
+.hero{position:relative; padding:4.5rem 0 2.4rem}
+.hero::before{
+  content:""; position:absolute; inset:-1.5rem -1.5rem 0; z-index:0;
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:22px 22px;
+  -webkit-mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  pointer-events:none;
+}
+.hero > *{position:relative; z-index:1}
+
+/* Mono is reserved for what a machine produced — headings that name a
+   measurement, figures, digests, code. Every small label a human wrote stays
+   in the sans, because Martian Mono is wide and turns to mush below ~11px. */
+h1,h2,.figure-n,.cmp-d,.bar-v,code,pre{
+  font-family:'Martian Mono','JetBrains Mono',ui-monospace,monospace;
+}
+h1{
+  font-size:clamp(1.7rem,4.4vw,2.9rem); font-weight:600; line-height:1.18;
+  letter-spacing:-.04em; margin:.6rem 0 1rem;
+}
+h2{
+  font-size:clamp(1.05rem,2.2vw,1.35rem); font-weight:600; letter-spacing:-.03em;
+  margin:.35rem 0 1rem;
+}
+.eyebrow{
+  font-size:.7rem; font-weight:600; letter-spacing:.07em; text-transform:uppercase;
+  color:var(--ink-2); margin:0;
+}
+.lede{font-size:1.02rem; color:var(--ink-2); max-width:40rem; margin:0 0 2.2rem}
+.note{font-size:.9rem; color:var(--ink-2); max-width:44rem; margin:1rem 0 0}
+p.note:first-child{margin-top:0}
+strong{color:var(--ink); font-weight:600}
+em{font-style:italic}
+code{
+  font-size:.85em; background:color-mix(in srgb,var(--accent) 8%,var(--panel));
+  color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);
+  border-radius:2px; padding:.05em .3em;
+}
+pre{
+  margin:.3rem 0 1.1rem; padding:.75rem .9rem; overflow-x:auto;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  font-size:.74rem; line-height:1.65;
+}
+pre code{background:none; border:none; color:var(--ink); padding:0}
+.c-dim{color:var(--ink-3)}
+.c-flag{color:var(--flag)}
+.cap{
+  font-size:.7rem; font-weight:600; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--ink-2); margin:1.1rem 0 0;
+}
+
+section{padding:3.2rem 0 0; border-top:1px solid var(--rule); margin-top:3.2rem}
+
+/* THE SIGNATURE — two digests and a verdict. Every claim here rests on one. */
+.cmp{
+  display:grid; grid-template-columns:1fr auto; align-items:center;
+  gap:.2rem .9rem; padding:.7rem .9rem; margin-bottom:.6rem;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  border-left:3px solid var(--ink-3);
+}
+.cmp.is-same{border-left-color:var(--accent)}
+.cmp.is-diff{border-left-color:var(--flag)}
+.cmp-l{
+  grid-column:1/-1; font-size:.78rem; font-weight:600; color:var(--ink-2);
+}
+.cmp-d{font-size:.9rem; letter-spacing:.02em}
+.cmp.is-same .cmp-d{color:var(--accent)}
+.cmp.is-diff .cmp-d{color:var(--flag)}
+.cmp-v{font-size:.76rem; color:var(--ink-2); text-align:right}
+
+.worked{display:grid; grid-template-columns:1.15fr 1fr; gap:2.2rem; align-items:start; margin-bottom:2.4rem}
+.worked-verdict{padding-top:1.6rem}
+
+.facts{display:flex; flex-wrap:wrap; gap:2.2rem; margin:0; padding-top:1rem; border-top:1px solid var(--rule)}
+.facts div{margin:0}
+.facts dt{font-size:.7rem; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-2)}
+.facts dd{margin:.15rem 0 0; font-family:'Martian Mono',monospace; font-size:1.05rem; font-weight:600}
+
+table.grid{width:100%; border-collapse:collapse; margin:.4rem 0 0; font-size:.86rem}
+table.grid caption{
+  font-size:.72rem; font-weight:600; letter-spacing:.04em;
+  color:var(--ink-2); text-align:left; padding:1.4rem 0 .5rem;
+}
+table.grid th,table.grid td{padding:.55rem .7rem; text-align:left; border-bottom:1px solid var(--rule)}
+table.grid thead th{
+  font-size:.72rem; letter-spacing:.03em;
+  color:var(--ink-2); font-weight:600; vertical-align:bottom;
+}
+table.grid thead th.thin{font-size:.68rem; font-weight:500}
+table.grid tbody th{font-weight:600; color:var(--ink); white-space:nowrap}
+table.grid td{color:var(--ink-2)}
+table.grid.nums td{font-family:'Martian Mono',monospace; font-size:.82rem; color:var(--ink)}
+table.grid tbody tr.is-focus{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+table.grid tbody tr.is-focus th{box-shadow:inset 3px 0 0 var(--accent)}
+table.grid.small{font-size:.78rem}
+.sub{display:block; font-family:'Public Sans',sans-serif; font-size:.7rem;
+  letter-spacing:.01em; color:var(--ink-2); font-weight:400}
+
+.bars{display:flex; flex-direction:column; gap:.6rem; margin-top:.6rem}
+.bar{display:grid; grid-template-columns:8.5rem 1fr 5rem; gap:.9rem; align-items:center}
+.bar-l{font-size:.8rem; color:var(--ink-2)}
+.bar-t{display:block; height:16px; background:color-mix(in srgb,var(--rule) 70%,transparent)}
+.bar-f{display:block; height:100%}
+.bar-f.t-accent{background:var(--accent)}
+.bar-f.t-flag{background:var(--flag)}
+.bar-v{font-size:.78rem; text-align:right}
+
+.split{display:grid; grid-template-columns:1fr 1.25fr; gap:2.2rem; align-items:start}
+.figure{margin:0}
+.figure-n{font-size:2.9rem; font-weight:600; letter-spacing:-.05em; color:var(--accent); line-height:1}
+
+.limits{margin:0; display:flex; flex-direction:column; gap:1.1rem}
+.limits div{display:grid; grid-template-columns:9rem 1fr; gap:1.1rem}
+.limits dt{font-size:.72rem; font-weight:600; letter-spacing:.03em; text-transform:uppercase;
+  color:var(--ink-2); border-top:1px solid var(--rule); padding-top:.35rem}
+.limits dd{margin:0; font-size:.88rem; color:var(--ink-2)}
+
+footer{margin-top:3.4rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+  font-size:.78rem; color:var(--ink-2)}
+a{color:var(--accent)}
+a:focus-visible,:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+@media (max-width:760px){
+  .worked,.split{grid-template-columns:1fr; gap:1.4rem}
+  .worked-verdict{padding-top:0}
+  .limits div{grid-template-columns:1fr; gap:.2rem}
+  .bar{grid-template-columns:6.5rem 1fr 4rem; gap:.6rem}
+  .facts{gap:1.4rem}
+  table.grid{font-size:.78rem}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head><body>
+<div class="wrap">
+<header class="hero">
+    <p class="eyebrow">Rewind-Bench · results</p>
+    <h1>A repair can match<br>and still be wrong.</h1>
+    <p class="lede">We injected 67 known bugs into working notebooks and asked three AI agents to fix them.
+    Then we re-ran every accepted repair on data the agent had never seen.</p>
+
+    <div class="worked">
+      <div class="worked-code">
+        <p class="cap">one digit changed in a working notebook</p>
+<pre><code><span class="c-dim">before  </span>let penalty = a.missedPayments * 22;
+<span class="c-flag">after   </span>let penalty = a.missedPayments * 23;</code></pre>
+        <p class="cap">what the agent submitted as its repair</p>
+<pre><code>let penalty = a.missedPayments * 23;   <span class="c-dim">// left alone</span>
+let bonus = Math.min(a.creditHistoryYears * 2.5
+                     + a.missedPayments, 25);  <span class="c-dim">// cancelled out</span></code></pre>
+        <p class="note">It never fixed the bug. It added a second error of the same size pointing the
+        other way, so the two cancelled — until <code>Math.min</code> clamps, which it does on the
+        held-out data.</p>
+      </div>
+      <div class="worked-verdict">
+        <div class="cmp is-same">
+      <span class="cmp-l">on the data it was shown</span>
+      <span class="cmp-d">2a9ad5c6…</span>
+      <span class="cmp-v">matches</span>
+    </div>
+        <div class="cmp is-diff">
+      <span class="cmp-l">on data it never saw</span>
+      <span class="cmp-d">365348fb…</span>
+      <span class="cmp-v">does not match</span>
+    </div>
+        <p class="note"><strong>2 of 28</strong> repairs accepted from the
+        best-equipped agent failed this second check. The other two agents failed this bug
+        outright — so the only agent that “solved” it, hadn’t.</p>
+      </div>
+    </div>
+
+    <dl class="facts">
+      <div><dt>repair episodes</dt><dd>297</dd></div>
+      <div><dt>models</dt><dd>2</dd></div>
+      <div><dt>corpora</dt><dd>2, never pooled</dd></div>
+      <div><dt>bugs with no visible symptom</dt><dd>16</dd></div>
+    </dl>
+  </header>
+<section>
+    <p class="eyebrow">held constant · model, temperature, seed, and the full source</p>
+    <h2>Three agents, one variable.</h2>
+    <table class="grid">
+      <thead><tr><th>agent</th><th>may run code</th><th>where its upstream data comes from</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">A · monolithic</th><td>no</td><td>reads the source and reasons about it</td></tr>
+        <tr><th scope="row">B · stepwise</th><td>yes</td><td>invents it, or pastes it in by hand</td></tr>
+        <tr class="is-focus"><th scope="row">C · rewind</th><td>yes</td><td>the scope actually recorded during the healthy run</td></tr>
+      </tbody>
+    </table>
+    <p class="note">B is how the tool behaved before this work. C is what we built. A is the
+    baseline almost nobody publishes, and it turned out to matter.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured · repairs that survived a held-out seed</p>
+    <h2>Whether the recording helps depends on the model.</h2>
+
+    <table class="grid nums">
+      <thead><tr>
+        <th rowspan="2">agent</th>
+        <th colspan="2">repairs that survived</th>
+        <th colspan="2">accepted, then failed held-out</th>
+      </tr><tr>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+      </tr></thead>
+      <tbody><tr>
+      <th scope="row">monolithic<span class="sub">reads only</span></th>
+      <td>26 / 30</td>
+      <td>28 / 30</td>
+      <td>0</td>
+      <td>0</td>
+    </tr><tr>
+      <th scope="row">stepwise<span class="sub">guesses its inputs</span></th>
+      <td>27 / 30</td>
+      <td>27 / 30</td>
+      <td>0</td>
+      <td>1</td>
+    </tr><tr class="is-focus">
+      <th scope="row">rewind<span class="sub">gets the recording</span></th>
+      <td>26 / 30</td>
+      <td>30 / 30</td>
+      <td>2</td>
+      <td>0</td>
+    </tr></tbody>
+    </table>
+
+    <p class="note">Under the small model the three arms are indistinguishable. Under the frontier
+    model, arm C solved every bug and lost no head-to-head comparison to either other arm. The
+    identical 30 bugs, prompts and seed were used for both — only the model changed.</p>
+
+    <table class="grid small">
+      <caption>Paired comparison on the same bug, McNemar exact</caption>
+      <thead><tr><th>model</th><th>comparison</th><th>discordant</th><th>p</th></tr></thead>
+      <tbody>
+        <tr><td>DeepSeek-V4-Flash</td><td>rewind vs stepwise</td>
+            <td>0 : 1</td><td>1.00</td></tr><tr><td>DeepSeek-V4-Flash</td><td>stepwise vs monolithic</td>
+            <td>1 : 0</td><td>1.00</td></tr><tr><td>DeepSeek-V4-Flash</td><td>rewind vs monolithic</td>
+            <td>1 : 1</td><td>1.00</td></tr>
+        <tr><td>GLM-5.2</td><td>rewind vs stepwise</td>
+            <td>3 : 0</td><td>0.25</td></tr><tr><td>GLM-5.2</td><td>stepwise vs monolithic</td>
+            <td>0 : 1</td><td>1.00</td></tr><tr><td>GLM-5.2</td><td>rewind vs monolithic</td>
+            <td>2 : 0</td><td>0.50</td></tr>
+      </tbody>
+    </table>
+    <p class="note">No difference reaches significance at n = 30, and none is claimed. What
+    changed between models is the consistency of the direction, not the p-value.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured · tokens spent per repair that survived, GLM-5.2</p>
+    <h2>It is not free.</h2>
+    <div class="bars">
+      <div class="bar">
+      <span class="bar-l">A · monolithic</span>
+      <span class="bar-t"><i class="bar-f t-accent" style="width:18%"></i></span>
+      <span class="bar-v">15,923</span>
+    </div>
+      <div class="bar">
+      <span class="bar-l">B · stepwise</span>
+      <span class="bar-t"><i class="bar-f t-flag" style="width:100%"></i></span>
+      <span class="bar-v">87,397</span>
+    </div>
+      <div class="bar">
+      <span class="bar-l">C · rewind</span>
+      <span class="bar-t"><i class="bar-f t-flag" style="width:67%"></i></span>
+      <span class="bar-v">58,855</span>
+    </div>
+    </div>
+    <p class="note">Handing the agent the recording costs <strong>32.7%</strong> less than
+    making it guess — and <strong>3.7×</strong> more than not running anything at all. If a
+    program fits in the prompt, reading it beats every interactive strategy we tried.</p>
+  </section>
+<section>
+    <p class="eyebrow">audited · could the agent see anything was wrong?</p>
+    <h2>Some bugs have no symptom.</h2>
+    <p class="note">The symptom shown to an agent is the final cell's output. A mutation only had
+    to change the <em>whole run's</em> hash to enter the corpus. Those are different scopes, so a
+    bug can be valid and still be invisible from where the agent stands. We counted them.</p>
+
+    <table class="grid nums">
+      <thead><tr><th>corpus</th><th>bugs</th><th>observable</th><th>invisible</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">designed</th><td>30</td><td>25 <span class="sub">83%</span></td><td>5</td></tr>
+        <tr><th scope="row">found</th><td>39</td><td>28 <span class="sub">72%</span></td><td>11</td></tr>
+      </tbody>
+    </table>
+
+    <table class="grid nums">
+      <caption>Found corpus, split by whether the bug was observable</caption>
+      <thead><tr><th>agent</th><th>observable (28)</th><th>invisible (11)</th></tr></thead>
+      <tbody>
+        <tr>
+            <th scope="row">monolithic</th>
+            <td>25 <span class="sub">89%</span></td>
+            <td>2</td></tr><tr>
+            <th scope="row">stepwise</th>
+            <td>26 <span class="sub">93%</span></td>
+            <td>2</td></tr><tr class="is-focus">
+            <th scope="row">rewind</th>
+            <td>25 <span class="sub">89%</span></td>
+            <td>4</td></tr>
+      </tbody>
+    </table>
+    <p class="note">This hits all three arms identically, so the paired comparisons stand — but
+    the raw totals understate every arm. On bugs an agent could actually see, all three land in
+    the high eighties to low nineties.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured before any model was involved · replay fidelity</p>
+    <h2>Replay is only meaningful if cells repeat.</h2>
+    <div class="split">
+      <div>
+        <p class="figure"><span class="figure-n">0.8942</span></p>
+        <p class="note">of cells return a bit-identical result given identical source and identical
+        incoming scope. 93 of 104 cells, 10 replays each, 1,040 replays. Verified separately:
+        0 cells received a varying input scope, so the control held.</p>
+      </div>
+      <table class="grid small">
+        <thead><tr><th>cause of drift</th><th>labels</th><th>what it was</th></tr></thead>
+        <tbody><tr><th scope="row">wall-clock</th><td>7</td><td><code>Date.now()</code> inside the returned value</td></tr><tr><th scope="row">network</th><td>4</td><td>live FX and latency endpoints</td></tr><tr><th scope="row">unknown</th><td>2</td><td>traced to a real race in the engine being measured</td></tr><tr><th scope="row">PRNG</th><td>1</td><td>unseeded <code>Math.random()</code></td></tr></tbody>
+      </table>
+    </div>
+    <p class="note">14 labels over 11 cells — three cells drift for more than one reason, and the
+    table says so rather than dividing them up. Two of the unknowns turned out to be a genuine
+    concurrency bug in the engine we were measuring, which we reported and worked around.</p>
+  </section>
+<section>
+    <p class="eyebrow">stated, rather than buried</p>
+    <h2>What this does not show.</h2>
+    <dl class="limits">
+      <div><dt>size</dt><dd>The largest notebook here is 21 cells; the designed ones are 6–9. Everything fits in a prompt, which is exactly the regime where an agent that reads everything should win — and it does. Nothing here speaks to programs that do not fit.</dd></div><div><dt>power</dt><dd>n = 30 and 39. No accuracy difference reaches significance and none is claimed.</dd></div><div><dt>held-out coverage</dt><dd>Lucky passes are only measurable where we control the seeds. The found corpus reports this as not measured, never as zero.</dd></div><div><dt>deep bands</dt><dd>The found corpus's deeper bands come entirely from one repeated-template notebook. Treat those rows as a case study, not a sample.</dd></div><div><dt>our own errors</dt><dd>The bench was wrong four times. Each was caught by re-deriving every number from the raw logs rather than trusting a summary, and each correction is an amendment in the commit history — including the one that deleted our best-looking result.</dd></div>
+    </dl>
+  </section>
+<footer>
+  Generated from results/metrics.json and results/symptom-audit.json ·
+  every figure recomputed, none typed by hand ·
+  <a href="https://github.com/afrizagilleon/rewind-bench">github.com/afrizagilleon/rewind-bench</a>
+</footer>
+</div>
+</body></html>
