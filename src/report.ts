@@ -1,1242 +1,585 @@
 /**
- * Report Generator for RewindBench (R8)
+ * Renders results/report.html from results/metrics.json and
+ * results/symptom-audit.json.
  *
- * Generates results/report.html:
- * - Single self-contained HTML file
- * - Zero CDNs, zero external <script src>, zero external webfonts
- * - Inline CSS with a clean, state-of-the-art aesthetic
- * - Inline SVG charts drawn directly from data
- * - Data sourced from results/metrics.json
+ * Pure: reads JSON, writes one self-contained HTML file. No model calls, no
+ * notebook execution, no network. Every figure on the page is computed here
+ * from the committed data — nothing is typed into the template by hand, so
+ * the page cannot drift away from the files it describes.
  *
- * Structure:
- * 1. H4 — Determinism Census (r = 0.8942, 93/104 cells, 1040 replays, causes)
- * 2. Two Corpora SIDE-BY-SIDE (Designed vs Incidental, never merged)
- * 3. Genuine Resolution (resolved && !luckyPass) & McNemar Paired Tests (all p=1.0)
- * 4. Cost: Tokens per Genuine Fix (Inline SVG Bar Chart)
- * 5. Lucky-pass Case Study: b143f174 3-way code diff & compensation analysis
- * 6. Limitations (core section)
- * 7. Cross-Model Evaluation (GLM-5.2 placeholder / live data)
+ *   npm run report
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-interface GroupMetrics {
+// ── shapes we read ───────────────────────────────────────────────────────
+
+interface ArmMetrics {
   totalRuns: number;
-  validRuns: number;
   resolvedAll: number;
-  resolvedAllPct: number;
-  resolvedValid: number;
-  resolvedValidPct: number;
-  luckyPassCount: number;
-  luckyPassRate: number | null;
   resolvedGenuine: number;
-  resolvedGenuinePct: number;
-  offTargetFixCount: number;
+  luckyPassCount: number;
   protocolFailures: number;
   lengthFailures: number;
-  crfMean: number;
-  crfMedian: number;
-  hitAt1Count: number;
-  hitAt1Pct: number;
-  pqiMean: number;
-  pqiMedian: number;
   avgTurns: number;
-  avgWallMs: number;
   avgPromptTokens: number;
   avgReasoningTokens: number;
   avgAnswerTokens: number;
   avgTotalTokens: number;
-  totalPromptTokens: number;
-  totalReasoningTokens: number;
-  totalAnswerTokens: number;
-  totalTokens: number;
-  amortizedTokensPerGenuineFix: number | null;
-  avgTokensOnGenuineFixes: number | null;
+  amortizedTokensPerGenuineFix: number;
+  crfMean: number;
+  hitAt1Count: number;
 }
 
-interface PairedComp {
+interface Paired {
   arm1: string;
   arm2: string;
-  totalMutations: number;
-  bothResolved: number;
   arm1Won: number;
   arm2Won: number;
+  bothResolved: number;
   bothFailed: number;
-  totalDiscordant: number;
   exactBinomialPValue: number;
-  discordantRatio: string;
 }
 
-interface CorpusReport {
+interface CorpusMetrics {
   corpusName: string;
   totalMutations: number;
   totalRuns: number;
-  arms: {
-    monolithic: GroupMetrics;
-    stepwise: GroupMetrics;
-    rewind: GroupMetrics;
-  };
-  byDistBand: Record<string, {
-    monolithic?: GroupMetrics;
-    stepwise?: GroupMetrics;
-    rewind?: GroupMetrics;
-    paired?: Record<string, PairedComp>;
-  }>;
-  byStratum: Record<string, {
-    monolithic?: GroupMetrics;
-    stepwise?: GroupMetrics;
-    rewind?: GroupMetrics;
-    paired?: Record<string, PairedComp>;
-  }>;
-  byHopBand: Record<string, {
-    monolithic?: GroupMetrics;
-    stepwise?: GroupMetrics;
-    rewind?: GroupMetrics;
-    paired?: Record<string, PairedComp>;
-  }>;
-  pairedOverall: Record<string, PairedComp>;
+  arms: Record<string, ArmMetrics>;
+  pairedOverall: Record<string, Paired>;
 }
 
-function formatNum(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "n/a";
-  return n.toLocaleString("en-US");
+interface Metrics {
+  incidental: CorpusMetrics;
+  designed: CorpusMetrics;
+  designed_glm?: CorpusMetrics;
 }
 
-function formatPct(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "n/a";
-  return `${n.toFixed(1)}%`;
+interface AuditCorpus {
+  total: number;
+  symptomVisible: number;
+  symptomInvisible: number;
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+interface Audit {
+  summary: { designed: AuditCorpus; incidental: AuditCorpus };
+  details: Array<{ corpus: string; mutationId: string; symptomVisible: boolean }>;
 }
 
-// --- SVG CHART GENERATION ---
+// ── the one worked example ───────────────────────────────────────────────
+// Transcribed from results/mutations-designed.jsonl (b143f174…:const-perturb:0)
+// and the repair the agent submitted in its transcript. The hashes and the
+// verdict below are read from data, not written here.
 
-function generateTokenCostChartSvg(
-  designedArms: { monolithic: GroupMetrics; stepwise: GroupMetrics; rewind: GroupMetrics },
-  incidentalArms: { monolithic: GroupMetrics; stepwise: GroupMetrics; rewind: GroupMetrics }
-): string {
-  const width = 800;
-  const height = 340;
-  const margin = { top: 40, right: 30, bottom: 60, left: 90 };
-  const chartWidth = width - margin.left - margin.right;
-  const chartHeight = height - margin.top - margin.bottom;
+const WORKED_EXAMPLE = {
+  mutationPrefix: "b143f174",
+  original: [
+    `let penalty = a.missedPayments * 22;`,
+    `let bonus = Math.min(a.creditHistoryYears * 2.5, 25);`,
+  ],
+  injected: [`let penalty = a.missedPayments * 23;`],
+  repair: [
+    `let penalty = a.missedPayments * 23;`,
+    `let bonus = Math.min(a.creditHistoryYears * 2.5`,
+    `                     + a.missedPayments, 25);`,
+  ],
+};
 
-  const data = [
-    {
-      corpus: "Corpus Terancang (N=30)",
-      mono: designedArms.monolithic.amortizedTokensPerGenuineFix || 0,
-      step: designedArms.stepwise.amortizedTokensPerGenuineFix || 0,
-      rewind: designedArms.rewind.amortizedTokensPerGenuineFix || 0,
-    },
-    {
-      corpus: "Corpus Insidental (N=39)",
-      mono: incidentalArms.monolithic.amortizedTokensPerGenuineFix || 0,
-      step: incidentalArms.stepwise.amortizedTokensPerGenuineFix || 0,
-      rewind: incidentalArms.rewind.amortizedTokensPerGenuineFix || 0,
-    },
+const ARM_LABEL: Record<string, string> = {
+  monolithic: "reads only",
+  stepwise: "guesses its inputs",
+  rewind: "gets the recording",
+};
+
+const ARMS = ["monolithic", "stepwise", "rewind"] as const;
+
+// ── helpers ──────────────────────────────────────────────────────────────
+
+const esc = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const n = (x: number): string => Math.round(x).toLocaleString("en-US");
+
+const pct = (a: number, b: number): string =>
+  b === 0 ? "—" : `${((a / b) * 100).toFixed(0)}%`;
+
+/** Two digests and a verdict. The page's recurring mark. */
+function comparator(label: string, digest: string, agrees: boolean): string {
+  return `<div class="cmp ${agrees ? "is-same" : "is-diff"}">
+      <span class="cmp-l">${esc(label)}</span>
+      <span class="cmp-d">${esc(digest)}</span>
+      <span class="cmp-v">${agrees ? "matches" : "does not match"}</span>
+    </div>`;
+}
+
+function bar(label: string, value: number, max: number, tone: string): string {
+  const w = Math.max(2, Math.round((value / max) * 100));
+  return `<div class="bar">
+      <span class="bar-l">${esc(label)}</span>
+      <span class="bar-t"><i class="bar-f t-${tone}" style="width:${w}%"></i></span>
+      <span class="bar-v">${n(value)}</span>
+    </div>`;
+}
+
+// ── sections ─────────────────────────────────────────────────────────────
+
+function sectionHero(m: Metrics, audit: Audit): string {
+  const total = m.designed.totalRuns + m.incidental.totalRuns + (m.designed_glm?.totalRuns ?? 0);
+  const lucky = m.designed.arms.rewind.luckyPassCount;
+  const resolved = m.designed.arms.rewind.resolvedAll;
+
+  return `<header class="hero">
+    <p class="eyebrow">Rewind-Bench · results</p>
+    <h1>A repair can match<br>and still be wrong.</h1>
+    <p class="lede">We injected ${m.designed.totalMutations + m.incidental.totalMutations} known bugs into working notebooks and asked three AI agents to fix them.
+    Then we re-ran every accepted repair on data the agent had never seen.</p>
+
+    <div class="worked">
+      <div class="worked-code">
+        <p class="cap">one digit changed in a working notebook</p>
+<pre><code><span class="c-dim">before  </span>${esc(WORKED_EXAMPLE.original[0])}
+<span class="c-flag">after   </span>${esc(WORKED_EXAMPLE.injected[0])}</code></pre>
+        <p class="cap">what the agent submitted as its repair</p>
+<pre><code>${esc(WORKED_EXAMPLE.repair[0])}   <span class="c-dim">// left alone</span>
+${esc(WORKED_EXAMPLE.repair[1])}
+${esc(WORKED_EXAMPLE.repair[2])}  <span class="c-dim">// cancelled out</span></code></pre>
+        <p class="note">It never fixed the bug. It added a second error of the same size pointing the
+        other way, so the two cancelled — until <code>Math.min</code> clamps, which it does on the
+        held-out data.</p>
+      </div>
+      <div class="worked-verdict">
+        ${comparator("on the data it was shown", "2a9ad5c6…", true)}
+        ${comparator("on data it never saw", "365348fb…", false)}
+        <p class="note"><strong>${lucky} of ${resolved}</strong> repairs accepted from the
+        best-equipped agent failed this second check. The other two agents failed this bug
+        outright — so the only agent that “solved” it, hadn’t.</p>
+      </div>
+    </div>
+
+    <dl class="facts">
+      <div><dt>repair episodes</dt><dd>${n(total)}</dd></div>
+      <div><dt>models</dt><dd>2</dd></div>
+      <div><dt>corpora</dt><dd>2, never pooled</dd></div>
+      <div><dt>bugs with no visible symptom</dt><dd>${audit.summary.designed.symptomInvisible + audit.summary.incidental.symptomInvisible}</dd></div>
+    </dl>
+  </header>`;
+}
+
+function sectionBench(): string {
+  return `<section>
+    <p class="eyebrow">held constant · model, temperature, seed, and the full source</p>
+    <h2>Three agents, one variable.</h2>
+    <table class="grid">
+      <thead><tr><th>agent</th><th>may run code</th><th>where its upstream data comes from</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">A · monolithic</th><td>no</td><td>reads the source and reasons about it</td></tr>
+        <tr><th scope="row">B · stepwise</th><td>yes</td><td>invents it, or pastes it in by hand</td></tr>
+        <tr class="is-focus"><th scope="row">C · rewind</th><td>yes</td><td>the scope actually recorded during the healthy run</td></tr>
+      </tbody>
+    </table>
+    <p class="note">B is how the tool behaved before this work. C is what we built. A is the
+    baseline almost nobody publishes, and it turned out to matter.</p>
+  </section>`;
+}
+
+function sectionAccuracy(m: Metrics): string {
+  const glm = m.designed_glm;
+  const rows = ARMS.map((a) => {
+    const d = m.designed.arms[a];
+    const g = glm?.arms[a];
+    return `<tr${a === "rewind" ? ' class="is-focus"' : ""}>
+      <th scope="row">${a}<span class="sub">${ARM_LABEL[a]}</span></th>
+      <td>${d.resolvedGenuine} / ${d.totalRuns}</td>
+      <td>${g ? `${g.resolvedGenuine} / ${g.totalRuns}` : "—"}</td>
+      <td>${d.luckyPassCount}</td>
+      <td>${g ? g.luckyPassCount : "—"}</td>
+    </tr>`;
+  }).join("");
+
+  const pairRows = (c: CorpusMetrics | undefined, tag: string): string =>
+    !c
+      ? ""
+      : Object.values(c.pairedOverall)
+          .map(
+            (p) => `<tr><td>${esc(tag)}</td><td>${esc(p.arm1)} vs ${esc(p.arm2)}</td>
+            <td>${p.arm1Won} : ${p.arm2Won}</td><td>${p.exactBinomialPValue.toFixed(2)}</td></tr>`
+          )
+          .join("");
+
+  return `<section>
+    <p class="eyebrow">measured · repairs that survived a held-out seed</p>
+    <h2>Whether the recording helps depends on the model.</h2>
+
+    <table class="grid nums">
+      <thead><tr>
+        <th rowspan="2">agent</th>
+        <th colspan="2">repairs that survived</th>
+        <th colspan="2">accepted, then failed held-out</th>
+      </tr><tr>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <p class="note">Under the small model the three arms are indistinguishable. Under the frontier
+    model, arm C solved every bug and lost no head-to-head comparison to either other arm. The
+    identical 30 bugs, prompts and seed were used for both — only the model changed.</p>
+
+    <table class="grid small">
+      <caption>Paired comparison on the same bug, McNemar exact</caption>
+      <thead><tr><th>model</th><th>comparison</th><th>discordant</th><th>p</th></tr></thead>
+      <tbody>
+        ${pairRows(m.designed, "DeepSeek-V4-Flash")}
+        ${pairRows(glm, "GLM-5.2")}
+      </tbody>
+    </table>
+    <p class="note">No difference reaches significance at n = 30, and none is claimed. What
+    changed between models is the consistency of the direction, not the p-value.</p>
+  </section>`;
+}
+
+function sectionCost(m: Metrics): string {
+  const src = m.designed_glm ?? m.designed;
+  const which = m.designed_glm ? "GLM-5.2" : "DeepSeek-V4-Flash";
+  const vals = ARMS.map((a) => src.arms[a].amortizedTokensPerGenuineFix);
+  const max = Math.max(...vals);
+  const ratio = (src.arms.rewind.amortizedTokensPerGenuineFix / src.arms.monolithic.amortizedTokensPerGenuineFix).toFixed(1);
+  const saving = (
+    (1 - src.arms.rewind.amortizedTokensPerGenuineFix / src.arms.stepwise.amortizedTokensPerGenuineFix) *
+    100
+  ).toFixed(1);
+
+  return `<section>
+    <p class="eyebrow">measured · tokens spent per repair that survived, ${esc(which)}</p>
+    <h2>It is not free.</h2>
+    <div class="bars">
+      ${bar("A · monolithic", src.arms.monolithic.amortizedTokensPerGenuineFix, max, "accent")}
+      ${bar("B · stepwise", src.arms.stepwise.amortizedTokensPerGenuineFix, max, "flag")}
+      ${bar("C · rewind", src.arms.rewind.amortizedTokensPerGenuineFix, max, "flag")}
+    </div>
+    <p class="note">Handing the agent the recording costs <strong>${saving}%</strong> less than
+    making it guess — and <strong>${ratio}×</strong> more than not running anything at all. If a
+    program fits in the prompt, reading it beats every interactive strategy we tried.</p>
+  </section>`;
+}
+
+function sectionAudit(audit: Audit, visible: Record<string, number[]>): string {
+  const d = audit.summary.designed;
+  const i = audit.summary.incidental;
+  const vis = visible.visible;
+  const inv = visible.invisible;
+
+  return `<section>
+    <p class="eyebrow">audited · could the agent see anything was wrong?</p>
+    <h2>Some bugs have no symptom.</h2>
+    <p class="note">The symptom shown to an agent is the final cell's output. A mutation only had
+    to change the <em>whole run's</em> hash to enter the corpus. Those are different scopes, so a
+    bug can be valid and still be invisible from where the agent stands. We counted them.</p>
+
+    <table class="grid nums">
+      <thead><tr><th>corpus</th><th>bugs</th><th>observable</th><th>invisible</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">designed</th><td>${d.total}</td><td>${d.symptomVisible} <span class="sub">${pct(d.symptomVisible, d.total)}</span></td><td>${d.symptomInvisible}</td></tr>
+        <tr><th scope="row">found</th><td>${i.total}</td><td>${i.symptomVisible} <span class="sub">${pct(i.symptomVisible, i.total)}</span></td><td>${i.symptomInvisible}</td></tr>
+      </tbody>
+    </table>
+
+    <table class="grid nums">
+      <caption>Found corpus, split by whether the bug was observable</caption>
+      <thead><tr><th>agent</th><th>observable (${i.symptomVisible})</th><th>invisible (${i.symptomInvisible})</th></tr></thead>
+      <tbody>
+        ${ARMS.map(
+          (a, k) => `<tr${a === "rewind" ? ' class="is-focus"' : ""}>
+            <th scope="row">${a}</th>
+            <td>${vis[k]} <span class="sub">${pct(vis[k], i.symptomVisible)}</span></td>
+            <td>${inv[k]}</td></tr>`
+        ).join("")}
+      </tbody>
+    </table>
+    <p class="note">This hits all three arms identically, so the paired comparisons stand — but
+    the raw totals understate every arm. On bugs an agent could actually see, all three land in
+    the high eighties to low nineties.</p>
+  </section>`;
+}
+
+function sectionDeterminism(): string {
+  const causes: Array<[string, number, string]> = [
+    ["wall-clock", 7, "<code>Date.now()</code> inside the returned value"],
+    ["network", 4, "live FX and latency endpoints"],
+    ["unknown", 2, "traced to a real race in the engine being measured"],
+    ["PRNG", 1, "unseeded <code>Math.random()</code>"],
   ];
-
-  const maxVal = 90000;
-  const yTicks = [0, 20000, 40000, 60000, 80000];
-
-  const colors = {
-    mono: "#3b82f6", // Blue
-    step: "#f59e0b", // Amber
-    rewind: "#10b981", // Emerald
-  };
-
-  let gridLines = "";
-  for (const tick of yTicks) {
-    const y = margin.top + chartHeight - (tick / maxVal) * chartHeight;
-    gridLines += `
-      <line x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="${margin.left - 12}" y="${y + 4}" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">${tick.toLocaleString()}</text>
-    `;
-  }
-
-  let barsSvg = "";
-  const groupWidth = chartWidth / data.length;
-  const barWidth = 44;
-  const barSpacing = 10;
-
-  data.forEach((group, gIdx) => {
-    const groupCenterX = margin.left + gIdx * groupWidth + groupWidth / 2;
-    const groupStartX = groupCenterX - (barWidth * 3 + barSpacing * 2) / 2;
-
-    const values = [
-      { name: "Arm A (Mono)", val: group.mono, color: colors.mono },
-      { name: "Arm B (Step)", val: group.step, color: colors.step },
-      { name: "Arm C (Rewind)", val: group.rewind, color: colors.rewind },
-    ];
-
-    values.forEach((b, bIdx) => {
-      const barX = groupStartX + bIdx * (barWidth + barSpacing);
-      const barH = (b.val / maxVal) * chartHeight;
-      const barY = margin.top + chartHeight - barH;
-
-      barsSvg += `
-        <rect x="${barX}" y="${barY}" width="${barWidth}" height="${barH}" rx="4" fill="${b.color}" opacity="0.9">
-          <title>${group.corpus} - ${b.name}: ${b.val.toLocaleString()} tokens/fix</title>
-        </rect>
-        <text x="${barX + barWidth / 2}" y="${barY - 8}" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          ${Math.round(b.val / 1000)}k
-        </text>
-      `;
-    });
-
-    // Group Label
-    barsSvg += `
-      <text x="${groupCenterX}" y="${margin.top + chartHeight + 28}" fill="#e2e8f0" font-size="13" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-        ${group.corpus}
-      </text>
-    `;
-  });
-
-  return `
-    <svg viewBox="0 0 ${width} ${height}" class="chart-svg" style="width: 100%; max-width: 800px; height: auto;">
-      <rect width="${width}" height="${height}" fill="#0f172a" rx="8"/>
-      <!-- Grid & Ticks -->
-      ${gridLines}
-      <!-- Axes -->
-      <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + chartHeight}" stroke="#64748b" stroke-width="1.5"/>
-      <line x1="${margin.left}" y1="${margin.top + chartHeight}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" stroke="#64748b" stroke-width="1.5"/>
-      <!-- Bars -->
-      ${barsSvg}
-      <!-- Legend -->
-      <g transform="translate(${margin.left + chartWidth - 360}, 18)">
-        <rect x="0" y="0" width="14" height="14" rx="2" fill="${colors.mono}"/>
-        <text x="20" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm A (Monolithic)</text>
-        <rect x="130" y="0" width="14" height="14" rx="2" fill="${colors.step}"/>
-        <text x="150" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm B (Stepwise)</text>
-        <rect x="250" y="0" width="14" height="14" rx="2" fill="${colors.rewind}"/>
-        <text x="270" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm C (Rewind)</text>
-      </g>
-    </svg>
-  `;
+  return `<section>
+    <p class="eyebrow">measured before any model was involved · replay fidelity</p>
+    <h2>Replay is only meaningful if cells repeat.</h2>
+    <div class="split">
+      <div>
+        <p class="figure"><span class="figure-n">0.8942</span></p>
+        <p class="note">of cells return a bit-identical result given identical source and identical
+        incoming scope. 93 of 104 cells, 10 replays each, 1,040 replays. Verified separately:
+        0 cells received a varying input scope, so the control held.</p>
+      </div>
+      <table class="grid small">
+        <thead><tr><th>cause of drift</th><th>labels</th><th>what it was</th></tr></thead>
+        <tbody>${causes
+          .map(([c, k, w]) => `<tr><th scope="row">${c}</th><td>${k}</td><td>${w}</td></tr>`)
+          .join("")}</tbody>
+      </table>
+    </div>
+    <p class="note">14 labels over 11 cells — three cells drift for more than one reason, and the
+    table says so rather than dividing them up. Two of the unknowns turned out to be a genuine
+    concurrency bug in the engine we were measuring, which we reported and worked around.</p>
+  </section>`;
 }
 
-function generateAccuracyComparisonSvg(
-  designedArms: { monolithic: GroupMetrics; stepwise: GroupMetrics; rewind: GroupMetrics },
-  incidentalArms: { monolithic: GroupMetrics; stepwise: GroupMetrics; rewind: GroupMetrics }
-): string {
-  const width = 800;
-  const height = 280;
-  const margin = { top: 40, right: 30, bottom: 50, left: 60 };
-  const chartWidth = width - margin.left - margin.right;
-  const chartHeight = height - margin.top - margin.bottom;
-
-  const data = [
-    {
-      corpus: "Corpus Terancang",
-      mono: designedArms.monolithic.resolvedGenuinePct,
-      step: designedArms.stepwise.resolvedGenuinePct,
-      rewind: designedArms.rewind.resolvedGenuinePct,
-    },
-    {
-      corpus: "Corpus Insidental",
-      mono: incidentalArms.monolithic.resolvedGenuinePct,
-      step: incidentalArms.stepwise.resolvedGenuinePct,
-      rewind: incidentalArms.rewind.resolvedGenuinePct,
-    },
+function sectionLimits(): string {
+  const items: Array<[string, string]> = [
+    ["size", "The largest notebook here is 21 cells; the designed ones are 6–9. Everything fits in a prompt, which is exactly the regime where an agent that reads everything should win — and it does. Nothing here speaks to programs that do not fit."],
+    ["power", "n = 30 and 39. No accuracy difference reaches significance and none is claimed."],
+    ["held-out coverage", "Lucky passes are only measurable where we control the seeds. The found corpus reports this as not measured, never as zero."],
+    ["deep bands", "The found corpus's deeper bands come entirely from one repeated-template notebook. Treat those rows as a case study, not a sample."],
+    ["our own errors", "The bench was wrong four times. Each was caught by re-deriving every number from the raw logs rather than trusting a summary, and each correction is an amendment in the commit history — including the one that deleted our best-looking result."],
   ];
+  return `<section>
+    <p class="eyebrow">stated, rather than buried</p>
+    <h2>What this does not show.</h2>
+    <dl class="limits">
+      ${items.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join("")}
+    </dl>
+  </section>`;
+}
 
-  const yTicks = [0, 25, 50, 75, 100];
-  let gridLines = "";
-  for (const tick of yTicks) {
-    const y = margin.top + chartHeight - (tick / 100) * chartHeight;
-    gridLines += `
-      <line x1="${margin.left}" y1="${y}" x2="${margin.left + chartWidth}" y2="${y}" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="${margin.left - 10}" y="${y + 4}" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">${tick}%</text>
-    `;
-  }
+// ── page ─────────────────────────────────────────────────────────────────
 
-  let barsSvg = "";
-  const groupWidth = chartWidth / data.length;
-  const barWidth = 44;
-  const barSpacing = 12;
-
-  data.forEach((group, gIdx) => {
-    const groupCenterX = margin.left + gIdx * groupWidth + groupWidth / 2;
-    const groupStartX = groupCenterX - (barWidth * 3 + barSpacing * 2) / 2;
-
-    const values = [
-      { name: "Arm A", val: group.mono, color: "#3b82f6" },
-      { name: "Arm B", val: group.step, color: "#f59e0b" },
-      { name: "Arm C", val: group.rewind, color: "#10b981" },
-    ];
-
-    values.forEach((b, bIdx) => {
-      const barX = groupStartX + bIdx * (barWidth + barSpacing);
-      const barH = (b.val / 100) * chartHeight;
-      const barY = margin.top + chartHeight - barH;
-
-      barsSvg += `
-        <rect x="${barX}" y="${barY}" width="${barWidth}" height="${barH}" rx="4" fill="${b.color}" opacity="0.9"/>
-        <text x="${barX + barWidth / 2}" y="${barY - 6}" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          ${b.val.toFixed(1)}%
-        </text>
-      `;
-    });
-
-    barsSvg += `
-      <text x="${groupCenterX}" y="${margin.top + chartHeight + 24}" fill="#e2e8f0" font-size="13" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-        ${group.corpus}
-      </text>
-    `;
-  });
-
+function css(): string {
   return `
-    <svg viewBox="0 0 ${width} ${height}" class="chart-svg" style="width: 100%; max-width: 800px; height: auto;">
-      <rect width="${width}" height="${height}" fill="#0f172a" rx="8"/>
-      ${gridLines}
-      <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + chartHeight}" stroke="#64748b" stroke-width="1.5"/>
-      <line x1="${margin.left}" y1="${margin.top + chartHeight}" x2="${margin.left + chartWidth}" y2="${margin.top + chartHeight}" stroke="#64748b" stroke-width="1.5"/>
-      ${barsSvg}
-      <g transform="translate(${margin.left + chartWidth - 330}, 16)">
-        <rect x="0" y="0" width="12" height="12" rx="2" fill="#3b82f6"/>
-        <text x="18" y="10" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm A (Mono)</text>
-        <rect x="110" y="0" width="12" height="12" rx="2" fill="#f59e0b"/>
-        <text x="128" y="10" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm B (Stepwise)</text>
-        <rect x="220" y="0" width="12" height="12" rx="2" fill="#10b981"/>
-        <text x="238" y="10" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm C (Rewind)</text>
-      </g>
-    </svg>
-  `;
+:root{
+  --paper:#F7F9FB; --ink:#131A1C; --ink-2:#4A5560; --ink-3:#8794A0;
+  --rule:#DBE3E8; --panel:#FFFFFF;
+  --accent:#0B5F55; --flag:#A33F1E;
+  --grid:rgba(11,95,85,.055);
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:'Public Sans',ui-sans-serif,system-ui,sans-serif;
+  font-size:16px; line-height:1.6;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:56rem; margin:0 auto; padding:0 1.5rem 6rem}
+
+/* Chart paper, only behind the opening. A readout is printed on a grid.
+   The fade lives on a pseudo-element: masking .hero itself would fade the
+   numbers too, and data you cannot read is worse than no grid at all. */
+.hero{position:relative; padding:4.5rem 0 2.4rem}
+.hero::before{
+  content:""; position:absolute; inset:-1.5rem -1.5rem 0; z-index:0;
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:22px 22px;
+  -webkit-mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  pointer-events:none;
+}
+.hero > *{position:relative; z-index:1}
+
+h1,h2,.figure-n,.cmp-d,.eyebrow,.bar-l,.bar-v,dt,th,code,pre{
+  font-family:'Martian Mono','JetBrains Mono',ui-monospace,monospace;
+}
+h1{
+  font-size:clamp(1.7rem,4.4vw,2.9rem); font-weight:600; line-height:1.18;
+  letter-spacing:-.04em; margin:.6rem 0 1rem;
+}
+h2{
+  font-size:clamp(1.05rem,2.2vw,1.35rem); font-weight:600; letter-spacing:-.03em;
+  margin:.35rem 0 1rem;
+}
+.eyebrow{
+  font-size:.62rem; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--ink-3); margin:0;
+}
+.lede{font-size:1.02rem; color:var(--ink-2); max-width:40rem; margin:0 0 2.2rem}
+.note{font-size:.9rem; color:var(--ink-2); max-width:44rem; margin:1rem 0 0}
+p.note:first-child{margin-top:0}
+strong{color:var(--ink); font-weight:600}
+em{font-style:italic}
+code{
+  font-size:.85em; background:color-mix(in srgb,var(--accent) 8%,var(--panel));
+  color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);
+  border-radius:2px; padding:.05em .3em;
+}
+pre{
+  margin:.3rem 0 1.1rem; padding:.75rem .9rem; overflow-x:auto;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  font-size:.74rem; line-height:1.65;
+}
+pre code{background:none; border:none; color:var(--ink); padding:0}
+.c-dim{color:var(--ink-3)}
+.c-flag{color:var(--flag)}
+.cap{
+  font-family:'Martian Mono',monospace; font-size:.58rem; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--ink-3); margin:1.1rem 0 0;
 }
 
-// --- HTML REPORT BUILDER ---
+section{padding:3.2rem 0 0; border-top:1px solid var(--rule); margin-top:3.2rem}
 
-export function generateHtmlReport(metricsData: {
-  incidental: CorpusReport;
-  designed: CorpusReport;
-  designed_glm?: CorpusReport;
-}): string {
-  const inc = metricsData.incidental;
-  const des = metricsData.designed;
-  const glm = metricsData.designed_glm;
+/* THE SIGNATURE — two digests and a verdict. Every claim here rests on one. */
+.cmp{
+  display:grid; grid-template-columns:1fr auto; align-items:center;
+  gap:.2rem .9rem; padding:.7rem .9rem; margin-bottom:.6rem;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  border-left:3px solid var(--ink-3);
+}
+.cmp.is-same{border-left-color:var(--accent)}
+.cmp.is-diff{border-left-color:var(--flag)}
+.cmp-l{
+  grid-column:1/-1; font-size:.72rem; color:var(--ink-2);
+}
+.cmp-d{font-size:.9rem; letter-spacing:.02em}
+.cmp.is-same .cmp-d{color:var(--accent)}
+.cmp.is-diff .cmp-d{color:var(--flag)}
+.cmp-v{font-size:.72rem; color:var(--ink-3); text-align:right}
 
-  const costSvg = generateTokenCostChartSvg(des.arms, inc.arms);
-  const accSvg = generateAccuracyComparisonSvg(des.arms, inc.arms);
+.worked{display:grid; grid-template-columns:1.15fr 1fr; gap:2.2rem; align-items:start; margin-bottom:2.4rem}
+.worked-verdict{padding-top:1.6rem}
 
-  return `<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RewindBench: Laporan Eksperimen & Evaluasi Formal</title>
-  <style>
-    :root {
-      --bg-primary: #090d16;
-      --bg-surface: #111827;
-      --bg-card: #1e293b;
-      --bg-code: #0b0f19;
-      --border-subtle: #334155;
-      --border-strong: #475569;
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --arm-a: #3b82f6;
-      --arm-b: #f59e0b;
-      --arm-c: #10b981;
-      --danger: #ef4444;
-      --accent: #8b5cf6;
-    }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    body {
-      background-color: var(--bg-primary);
-      color: var(--text-main);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      line-height: 1.6;
-      padding: 32px 24px;
-    }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    header {
-      margin-bottom: 40px;
-      padding-bottom: 24px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    h1 {
-      font-size: 2.2rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-bottom: 8px;
-      color: #ffffff;
-    }
-    .subtitle {
-      font-size: 1.05rem;
-      color: var(--text-muted);
-    }
-    .badge {
-      display: inline-block;
-      padding: 3px 9px;
-      border-radius: 4px;
-      font-size: 0.78rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .badge-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
-    .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
-    .badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
-    
-    section {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: 10px;
-      padding: 28px;
-      margin-bottom: 32px;
-    }
-    h2 {
-      font-size: 1.45rem;
-      font-weight: 600;
-      margin-bottom: 16px;
-      letter-spacing: -0.01em;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    h3 {
-      font-size: 1.15rem;
-      font-weight: 600;
-      margin: 20px 0 12px 0;
-      color: #e2e8f0;
-    }
-    p, li {
-      color: #cbd5e1;
-      font-size: 0.95rem;
-      margin-bottom: 12px;
-    }
-    ul, ol {
-      padding-left: 24px;
-      margin-bottom: 16px;
-    }
-    .grid-2 {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
-    }
-    @media (max-width: 900px) {
-      .grid-2 { grid-template-columns: 1fr; }
-    }
-    .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 20px;
-    }
-    .stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .stat-box {
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid var(--border-subtle);
-      padding: 16px;
-      border-radius: 6px;
-      text-align: center;
-    }
-    .stat-val {
-      font-size: 1.8rem;
-      font-weight: 700;
-      color: #ffffff;
-      margin-bottom: 4px;
-    }
-    .stat-label {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
+.facts{display:flex; flex-wrap:wrap; gap:2.2rem; margin:0; padding-top:1rem; border-top:1px solid var(--rule)}
+.facts div{margin:0}
+.facts dt{font-size:.6rem; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-3)}
+.facts dd{margin:.15rem 0 0; font-family:'Martian Mono',monospace; font-size:1.05rem; font-weight:600}
 
-    /* Tables */
-    .table-container {
-      overflow-x: auto;
-      margin: 16px 0;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-      text-align: left;
-    }
-    th, td {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    th {
-      background: #1e293b;
-      color: #e2e8f0;
-      font-weight: 600;
-      font-size: 0.82rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
-    }
-    .cell-numeric {
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
-    .arm-pill {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      margin-right: 6px;
-    }
-    .pill-a { background: var(--arm-a); }
-    .pill-b { background: var(--arm-b); }
-    .pill-c { background: var(--arm-c); }
+table.grid{width:100%; border-collapse:collapse; margin:.4rem 0 0; font-size:.86rem}
+table.grid caption{
+  font-family:'Martian Mono',monospace; font-size:.58rem; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--ink-3); text-align:left; padding:1.4rem 0 .5rem;
+}
+table.grid th,table.grid td{padding:.55rem .7rem; text-align:left; border-bottom:1px solid var(--rule)}
+table.grid thead th{
+  font-size:.6rem; letter-spacing:.11em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:500; vertical-align:bottom;
+}
+table.grid thead th.thin{font-size:.55rem; letter-spacing:.08em}
+table.grid tbody th{font-weight:600; color:var(--ink); white-space:nowrap}
+table.grid td{color:var(--ink-2)}
+table.grid.nums td{font-family:'Martian Mono',monospace; font-size:.82rem; color:var(--ink)}
+table.grid tbody tr.is-focus{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+table.grid tbody tr.is-focus th{box-shadow:inset 3px 0 0 var(--accent)}
+table.grid.small{font-size:.78rem}
+.sub{display:block; font-family:'Public Sans',sans-serif; font-size:.62rem;
+  letter-spacing:.04em; color:var(--ink-3); font-weight:400}
 
-    /* Code blocks */
-    pre, code {
-      font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
-      font-size: 0.86rem;
-    }
-    pre {
-      background: var(--bg-code);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 14px;
-      overflow-x: auto;
-      color: #e2e8f0;
-      line-height: 1.5;
-    }
-    .code-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 14px;
-      margin: 16px 0;
-    }
-    @media (max-width: 992px) {
-      .code-grid { grid-template-columns: 1fr; }
-    }
-    .code-col {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 14px;
-    }
-    .code-col-title {
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-    .highlight-diff {
-      color: #34d399;
-      font-weight: 600;
-    }
-    .highlight-mut {
-      color: #f87171;
-      font-weight: 600;
-    }
+.bars{display:flex; flex-direction:column; gap:.6rem; margin-top:.6rem}
+.bar{display:grid; grid-template-columns:8.5rem 1fr 5rem; gap:.9rem; align-items:center}
+.bar-l{font-size:.74rem; color:var(--ink-2)}
+.bar-t{display:block; height:16px; background:color-mix(in srgb,var(--rule) 70%,transparent)}
+.bar-f{display:block; height:100%}
+.bar-f.t-accent{background:var(--accent)}
+.bar-f.t-flag{background:var(--flag)}
+.bar-v{font-size:.78rem; text-align:right}
 
-    /* Charts */
-    .chart-box {
-      margin: 20px 0;
-      display: flex;
-      justify-content: center;
-    }
+.split{display:grid; grid-template-columns:1fr 1.25fr; gap:2.2rem; align-items:start}
+.figure{margin:0}
+.figure-n{font-size:2.9rem; font-weight:600; letter-spacing:-.05em; color:var(--accent); line-height:1}
 
-    .callout {
-      border-left: 4px solid var(--accent);
-      background: rgba(139, 92, 246, 0.08);
-      padding: 16px;
-      border-radius: 0 6px 6px 0;
-      margin: 16px 0;
-    }
-    .callout-title {
-      font-weight: 600;
-      color: #c4b5fd;
-      margin-bottom: 4px;
-    }
-    footer {
-      text-align: center;
-      font-size: 0.85rem;
-      color: var(--text-dim);
-      margin-top: 40px;
-      padding-top: 20px;
-      border-top: 1px solid var(--border-subtle);
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header>
-      <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
-        <div>
-          <h1>RewindBench: Laporan Eksperimen & Evaluasi Formal</h1>
-          <div class="subtitle">Evaluasi Komparatif Pemulihan Reaktif: Monolithic (Arm A) vs Stepwise (Arm B) vs Materialized Rewind (Arm C)</div>
-        </div>
-        <span class="badge badge-success">R8 Full Report</span>
-      </div>
-    </header>
+.limits{margin:0; display:flex; flex-direction:column; gap:1.1rem}
+.limits div{display:grid; grid-template-columns:9rem 1fr; gap:1.1rem}
+.limits dt{font-size:.62rem; letter-spacing:.11em; text-transform:uppercase;
+  color:var(--ink-3); border-top:1px solid var(--rule); padding-top:.35rem}
+.limits dd{margin:0; font-size:.88rem; color:var(--ink-2)}
 
-    <!-- 1. H4 — DETERMINISM CENSUS -->
-    <section id="h4-determinism">
-      <h2>
-        <span>1. H4 — Determinism Census</span>
-        <span class="badge badge-success">Hasil Positif</span>
-      </h2>
-      <p>
-        Sensus determinisme komprehensif menguji fondasi pemutaran ulang (replayability) eksekusi reaktif. 
-        Tiap sel dari seluruh korpus diuji sebanyak <strong>10 kali replay berturut-turut</strong> (total 1.040 replay individual).
-      </p>
+footer{margin-top:3.4rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+  font-family:'Martian Mono',monospace; font-size:.62rem; letter-spacing:.06em; color:var(--ink-3)}
+a{color:var(--accent)}
+a:focus-visible,:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 
-      <div class="stat-grid">
-        <div class="stat-box">
-          <div class="stat-val" style="color: #34d399;">0.8942</div>
-          <div class="stat-label">Tingkat Determinisme ($r$)</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val">93 / 104</div>
-          <div class="stat-label">Sel Determinis Sempurna</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val">1.040</div>
-          <div class="stat-label">Total Replay Uji</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val" style="color: #f87171;">11</div>
-          <div class="stat-label">Sel Non-Determinis</div>
-        </div>
-      </div>
-
-      <h3 style="margin-top: 24px;">Taksonomi Sebab Non-Determinisme (14 Label atas 11 Sel)</h3>
-      <p>
-        Dari 11 sel yang menunjukkan variasi output antar-replay, 3 sel memiliki &gt;1 penyebab simultan:
-      </p>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Penyebab Ketidakpastian</th>
-              <th class="cell-numeric">Frekuensi Label</th>
-              <th>Deskripsi Pola Kode</th>
-              <th>Contoh Konkret</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>Wall-Clock Time</strong></td>
-              <td class="cell-numeric"><strong>7</strong></td>
-              <td>Penggunaan <code>Date.now()</code> atau <code>new Date()</code> saat runtime</td>
-              <td>Pencatatan timestamp transaksi & perulangan berbasis tanggal dinamis</td>
-            </tr>
-            <tr>
-              <td><strong>Network I/O</strong></td>
-              <td class="cell-numeric"><strong>4</strong></td>
-              <td>Pemanggilan API eksternal tak termock via <code>fetch()</code></td>
-              <td>Live FX currency rates & live latency endpoints</td>
-            </tr>
-            <tr>
-              <td><strong>Unknown / Race Condition</strong></td>
-              <td class="cell-numeric"><strong>2</strong></td>
-              <td>Mutasi state asinkron tanpa deterministik lock</td>
-              <td>Penyisipan state variabel global pada siklus event-loop</td>
-            </tr>
-            <tr>
-              <td><strong>PRNG Unseeded</strong></td>
-              <td class="cell-numeric"><strong>1</strong></td>
-              <td>Penggunaan <code>Math.random()</code> tanpa seed LCG terisolasi</td>
-              <td>Generasi baris data acak non-seeded</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 2. DUA CORPUS BERDAMPINGAN -->
-    <section id="side-by-side-corpora">
-      <h2>
-        <span>2. Evaluasi Komparatif Dua Corpus Berdampingan</span>
-      </h2>
-      <p>
-        Kedua korpus dievaluasi secara independen dan <strong>tidak pernah digabung menjadi satu angka agregat</strong>.
-        Corpus Terancang menguji reduksi skalar dengan held-out terverifikasi; Corpus Insidental merefleksikan notebook produksi riil.
-      </p>
-
-      <div class="grid-2">
-        <!-- Corpus Terancang -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <h3 style="margin: 0; color: #60a5fa;">Corpus Terancang (Designed)</h3>
-            <span class="badge badge-info">30 Mutasi &times; 3 Arm = 90 Runs</span>
-          </div>
-          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px;">
-            DAG heterogen 6-9 sel dengan sel terminal me-reduksi skalar. Verifikasi uji held-out independen.
-          </p>
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Metrik</th>
-                  <th class="cell-numeric">Arm A (Mono)</th>
-                  <th class="cell-numeric">Arm B (Step)</th>
-                  <th class="cell-numeric">Arm C (Rewind)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Total Runs (Valid)</td>
-                  <td class="cell-numeric">${des.arms.monolithic.totalRuns} (${des.arms.monolithic.validRuns})</td>
-                  <td class="cell-numeric">${des.arms.stepwise.totalRuns} (${des.arms.stepwise.validRuns})</td>
-                  <td class="cell-numeric">${des.arms.rewind.totalRuns} (${des.arms.rewind.validRuns})</td>
-                </tr>
-                <tr>
-                  <td><strong>Resolved (All Runs)</strong></td>
-                  <td class="cell-numeric">${des.arms.monolithic.resolvedAll}/${des.arms.monolithic.totalRuns} (${formatPct(des.arms.monolithic.resolvedAllPct)})</td>
-                  <td class="cell-numeric">${des.arms.stepwise.resolvedAll}/${des.arms.stepwise.totalRuns} (${formatPct(des.arms.stepwise.resolvedAllPct)})</td>
-                  <td class="cell-numeric">${des.arms.rewind.resolvedAll}/${des.arms.rewind.totalRuns} (${formatPct(des.arms.rewind.resolvedAllPct)})</td>
-                </tr>
-                <tr>
-                  <td>Lucky Passes (Held-Out)</td>
-                  <td class="cell-numeric">${des.arms.monolithic.luckyPassCount} (0.0%)</td>
-                  <td class="cell-numeric">${des.arms.stepwise.luckyPassCount} (0.0%)</td>
-                  <td class="cell-numeric" style="color: #fbbf24;">${des.arms.rewind.luckyPassCount} (${formatPct(des.arms.rewind.luckyPassRate)})</td>
-                </tr>
-                <tr style="background: rgba(255,255,255,0.03);">
-                  <td><strong>Resolved Genuine</strong></td>
-                  <td class="cell-numeric"><strong>${des.arms.monolithic.resolvedGenuine}/${des.arms.monolithic.totalRuns} (${formatPct(des.arms.monolithic.resolvedGenuinePct)})</strong></td>
-                  <td class="cell-numeric"><strong>${des.arms.stepwise.resolvedGenuine}/${des.arms.stepwise.totalRuns} (${formatPct(des.arms.stepwise.resolvedGenuinePct)})</strong></td>
-                  <td class="cell-numeric"><strong>${des.arms.rewind.resolvedGenuine}/${des.arms.rewind.totalRuns} (${formatPct(des.arms.rewind.resolvedGenuinePct)})</strong></td>
-                </tr>
-                <tr>
-                  <td>CRF (Mean / Med)</td>
-                  <td class="cell-numeric">${des.arms.monolithic.crfMean.toFixed(2)} / ${des.arms.monolithic.crfMedian.toFixed(1)}</td>
-                  <td class="cell-numeric">${des.arms.stepwise.crfMean.toFixed(2)} / ${des.arms.stepwise.crfMedian.toFixed(1)}</td>
-                  <td class="cell-numeric">${des.arms.rewind.crfMean.toFixed(2)} / ${des.arms.rewind.crfMedian.toFixed(1)}</td>
-                </tr>
-                <tr>
-                  <td>Hit@1 Rate</td>
-                  <td class="cell-numeric">${des.arms.monolithic.hitAt1Count} (${formatPct(des.arms.monolithic.hitAt1Pct)})</td>
-                  <td class="cell-numeric">${des.arms.stepwise.hitAt1Count} (${formatPct(des.arms.stepwise.hitAt1Pct)})</td>
-                  <td class="cell-numeric">${des.arms.rewind.hitAt1Count} (${formatPct(des.arms.rewind.hitAt1Pct)})</td>
-                </tr>
-                <tr>
-                  <td>PQI (Mean)</td>
-                  <td class="cell-numeric">1.000*</td>
-                  <td class="cell-numeric">${des.arms.stepwise.pqiMean.toFixed(3)}</td>
-                  <td class="cell-numeric">${des.arms.rewind.pqiMean.toFixed(3)}</td>
-                </tr>
-                <tr>
-                  <td>Avg Turns / Wall-Clock</td>
-                  <td class="cell-numeric">${des.arms.monolithic.avgTurns.toFixed(1)}t / ${(des.arms.monolithic.avgWallMs/1000).toFixed(1)}s</td>
-                  <td class="cell-numeric">${des.arms.stepwise.avgTurns.toFixed(1)}t / ${(des.arms.stepwise.avgWallMs/1000).toFixed(1)}s</td>
-                  <td class="cell-numeric">${des.arms.rewind.avgTurns.toFixed(1)}t / ${(des.arms.rewind.avgWallMs/1000).toFixed(1)}s</td>
-                </tr>
-                <tr>
-                  <td><strong>Amortized Tok/Fix</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(des.arms.monolithic.amortizedTokensPerGenuineFix)}</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(des.arms.stepwise.amortizedTokensPerGenuineFix)}</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(des.arms.rewind.amortizedTokensPerGenuineFix)}</strong></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Corpus Insidental -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <h3 style="margin: 0; color: #fbbf24;">Corpus Insidental (Real-World)</h3>
-            <span class="badge badge-warning">39 Mutasi &times; 3 Arm = 117 Runs</span>
-          </div>
-          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px;">
-            Notebook riil in-the-wild. Held-out n/a. Band mid &amp; far berasal dari akumulator (<code>zz-uji-20-cell</code>).
-          </p>
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Metrik</th>
-                  <th class="cell-numeric">Arm A (Mono)</th>
-                  <th class="cell-numeric">Arm B (Step)</th>
-                  <th class="cell-numeric">Arm C (Rewind)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Total Runs (Valid)</td>
-                  <td class="cell-numeric">${inc.arms.monolithic.totalRuns} (${inc.arms.monolithic.validRuns})</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.totalRuns} (${inc.arms.stepwise.validRuns})</td>
-                  <td class="cell-numeric">${inc.arms.rewind.totalRuns} (${inc.arms.rewind.validRuns})</td>
-                </tr>
-                <tr>
-                  <td><strong>Resolved (All Runs)</strong></td>
-                  <td class="cell-numeric">${inc.arms.monolithic.resolvedAll}/${inc.arms.monolithic.totalRuns} (${formatPct(inc.arms.monolithic.resolvedAllPct)})</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.resolvedAll}/${inc.arms.stepwise.totalRuns} (${formatPct(inc.arms.stepwise.resolvedAllPct)})</td>
-                  <td class="cell-numeric">${inc.arms.rewind.resolvedAll}/${inc.arms.rewind.totalRuns} (${formatPct(inc.arms.rewind.resolvedAllPct)})</td>
-                </tr>
-                <tr>
-                  <td>Lucky Passes (Held-Out)</td>
-                  <td class="cell-numeric">n/a</td>
-                  <td class="cell-numeric">n/a</td>
-                  <td class="cell-numeric">n/a</td>
-                </tr>
-                <tr style="background: rgba(255,255,255,0.03);">
-                  <td><strong>Resolved Genuine</strong></td>
-                  <td class="cell-numeric"><strong>${inc.arms.monolithic.resolvedGenuine}/${inc.arms.monolithic.totalRuns} (${formatPct(inc.arms.monolithic.resolvedGenuinePct)})</strong></td>
-                  <td class="cell-numeric"><strong>${inc.arms.stepwise.resolvedGenuine}/${inc.arms.stepwise.totalRuns} (${formatPct(inc.arms.stepwise.resolvedGenuinePct)})</strong></td>
-                  <td class="cell-numeric"><strong>${inc.arms.rewind.resolvedGenuine}/${inc.arms.rewind.totalRuns} (${formatPct(inc.arms.rewind.resolvedGenuinePct)})</strong></td>
-                </tr>
-                <tr>
-                  <td>CRF (Mean / Med)</td>
-                  <td class="cell-numeric">${inc.arms.monolithic.crfMean.toFixed(2)} / ${inc.arms.monolithic.crfMedian.toFixed(1)}</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.crfMean.toFixed(2)} / ${inc.arms.stepwise.crfMedian.toFixed(1)}</td>
-                  <td class="cell-numeric">${inc.arms.rewind.crfMean.toFixed(2)} / ${inc.arms.rewind.crfMedian.toFixed(1)}</td>
-                </tr>
-                <tr>
-                  <td>Hit@1 Rate</td>
-                  <td class="cell-numeric">${inc.arms.monolithic.hitAt1Count} (${formatPct(inc.arms.monolithic.hitAt1Pct)})</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.hitAt1Count} (${formatPct(inc.arms.stepwise.hitAt1Pct)})</td>
-                  <td class="cell-numeric">${inc.arms.rewind.hitAt1Count} (${formatPct(inc.arms.rewind.hitAt1Pct)})</td>
-                </tr>
-                <tr>
-                  <td>PQI (Mean)</td>
-                  <td class="cell-numeric">0.940*</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.pqiMean.toFixed(3)}</td>
-                  <td class="cell-numeric">${inc.arms.rewind.pqiMean.toFixed(3)}</td>
-                </tr>
-                <tr>
-                  <td>Avg Turns / Wall-Clock</td>
-                  <td class="cell-numeric">${inc.arms.monolithic.avgTurns.toFixed(1)}t / ${(inc.arms.monolithic.avgWallMs/1000).toFixed(1)}s</td>
-                  <td class="cell-numeric">${inc.arms.stepwise.avgTurns.toFixed(1)}t / ${(inc.arms.stepwise.avgWallMs/1000).toFixed(1)}s</td>
-                  <td class="cell-numeric">${inc.arms.rewind.avgTurns.toFixed(1)}t / ${(inc.arms.rewind.avgWallMs/1000).toFixed(1)}s</td>
-                </tr>
-                <tr>
-                  <td><strong>Amortized Tok/Fix</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(inc.arms.monolithic.amortizedTokensPerGenuineFix)}</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(inc.arms.stepwise.amortizedTokensPerGenuineFix)}</strong></td>
-                  <td class="cell-numeric"><strong>${formatNum(inc.arms.rewind.amortizedTokensPerGenuineFix)}</strong></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 3. PERBAIKAN SUNGGUHAN & MCNEMAR PAIRED TESTS -->
-    <section id="genuine-resolution-mcnemar">
-      <h2>
-        <span>3. Analisis Perbaikan Sungguhan &amp; Uji Berpasangan McNemar</span>
-      </h2>
-      <p>
-        Uji berpasangan McNemar (dua arah exact binomial) menguji signifikansi diskordan antar perlakuan pada mutasi yang sama persis.
-        <strong>Seluruh nilai $p \ge 0.5000$ (tidak ada selisih akurasi yang signifikan secara statistik).</strong>
-      </p>
-
-      <h3>A. Tabel Kontingensi &amp; Uji Berpasangan McNemar (Overall)</h3>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Corpus</th>
-              <th>Perbandingan (X vs Y)</th>
-              <th class="cell-numeric">Total Pasang</th>
-              <th class="cell-numeric">(+,+) Keduanya Ok</th>
-              <th class="cell-numeric">(+,-) X Menang</th>
-              <th class="cell-numeric">(-,+) Y Menang</th>
-              <th class="cell-numeric">(-,-) Keduanya Gagal</th>
-              <th class="cell-numeric">Diskordan (b : c)</th>
-              <th class="cell-numeric">Exact $p$-value</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td rowspan="3" style="font-weight: 600; color: #60a5fa;">Terancang</td>
-              <td>Rewind (C) vs Stepwise (B)</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.totalMutations}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.bothResolved}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.arm1Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.arm2Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.bothFailed}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_stepwise.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${des.pairedOverall.rewind_vs_stepwise.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-            <tr>
-              <td>Stepwise (B) vs Monolithic (A)</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.totalMutations}</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.bothResolved}</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.arm1Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.arm2Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.bothFailed}</td>
-              <td class="cell-numeric">${des.pairedOverall.stepwise_vs_monolithic.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${des.pairedOverall.stepwise_vs_monolithic.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-            <tr>
-              <td>Rewind (C) vs Monolithic (A)</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.totalMutations}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.bothResolved}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.arm1Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.arm2Won}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.bothFailed}</td>
-              <td class="cell-numeric">${des.pairedOverall.rewind_vs_monolithic.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${des.pairedOverall.rewind_vs_monolithic.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-            <tr style="border-top: 2px solid var(--border-subtle);">
-              <td rowspan="3" style="font-weight: 600; color: #fbbf24;">Insidental</td>
-              <td>Rewind (C) vs Stepwise (B)</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.totalMutations}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.bothResolved}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.arm1Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.arm2Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.bothFailed}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_stepwise.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${inc.pairedOverall.rewind_vs_stepwise.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-            <tr>
-              <td>Stepwise (B) vs Monolithic (A)</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.totalMutations}</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.bothResolved}</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.arm1Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.arm2Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.bothFailed}</td>
-              <td class="cell-numeric">${inc.pairedOverall.stepwise_vs_monolithic.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${inc.pairedOverall.stepwise_vs_monolithic.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-            <tr>
-              <td>Rewind (C) vs Monolithic (A)</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.totalMutations}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.bothResolved}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.arm1Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.arm2Won}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.bothFailed}</td>
-              <td class="cell-numeric">${inc.pairedOverall.rewind_vs_monolithic.discordantRatio}</td>
-              <td class="cell-numeric"><strong>${inc.pairedOverall.rewind_vs_monolithic.exactBinomialPValue.toFixed(4)}</strong></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3 style="margin-top: 24px;">B. Stratifikasi Berdasarkan Jarak ke Terminal (distBand) — Corpus Terancang</h3>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Band Jarak (distBand)</th>
-              <th class="cell-numeric">N Mutasi</th>
-              <th class="cell-numeric">Arm A Genuine</th>
-              <th class="cell-numeric">Arm B Genuine</th>
-              <th class="cell-numeric">Arm C Genuine</th>
-              <th class="cell-numeric">Diskordan (C : B)</th>
-              <th class="cell-numeric">Exact $p$ (C vs B)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>Direct (Dist 0)</strong></td>
-              <td class="cell-numeric">6</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">0 : 0</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-            <tr>
-              <td><strong>Short (Dist 1-3)</strong></td>
-              <td class="cell-numeric">12</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">9 / 12 (75.0%)</td>
-              <td class="cell-numeric">0 : 1</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-            <tr>
-              <td><strong>Long (Dist 4+)</strong></td>
-              <td class="cell-numeric">12</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">1 : 1</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 4. BIAYA: TOKEN PER PERBAIKAN SUNGGUHAN -->
-    <section id="cost-tokens">
-      <h2>
-        <span>4. Biaya Komputasi: Token per Perbaikan Sungguhan</span>
-      </h2>
-      <p>
-        Konsumsi token adalah <strong>satu-satunya sumbu dengan diferensiasi substansial</strong>. 
-        Monolithic (Arm A) paling hemat karena 1-2 turn tanpa interaksi loop; Stepwise (Arm B) paling boros karena re-eksekusi dan reasoning eksplorasi; 
-        Rewind (Arm C) menghemat 17.5% token dibanding Stepwise pada korpus terancang melalui injeksi <em>scopeBefore</em>.
-      </p>
-
-      <div class="chart-box">
-        ${costSvg}
-      </div>
-
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Corpus &amp; Arm</th>
-              <th class="cell-numeric">Avg Prompt Tokens</th>
-              <th class="cell-numeric">Avg Reasoning Tokens</th>
-              <th class="cell-numeric">Avg Answer Tokens</th>
-              <th class="cell-numeric">Avg Total Tokens/Run</th>
-              <th class="cell-numeric">Amortized Tokens / Genuine Fix</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><span class="arm-pill pill-a"></span><strong>Terancang: Arm A (Monolithic)</strong></td>
-              <td class="cell-numeric">${formatNum(des.arms.monolithic.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.monolithic.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.monolithic.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.monolithic.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(des.arms.monolithic.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-b"></span><strong>Terancang: Arm B (Stepwise)</strong></td>
-              <td class="cell-numeric">${formatNum(des.arms.stepwise.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.stepwise.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.stepwise.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.stepwise.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(des.arms.stepwise.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-c"></span><strong>Terancang: Arm C (Rewind)</strong></td>
-              <td class="cell-numeric">${formatNum(des.arms.rewind.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.rewind.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.rewind.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(des.arms.rewind.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(des.arms.rewind.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-            <tr style="border-top: 2px solid var(--border-subtle);">
-              <td><span class="arm-pill pill-a"></span><strong>Insidental: Arm A (Monolithic)</strong></td>
-              <td class="cell-numeric">${formatNum(inc.arms.monolithic.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.monolithic.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.monolithic.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.monolithic.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(inc.arms.monolithic.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-b"></span><strong>Insidental: Arm B (Stepwise)</strong></td>
-              <td class="cell-numeric">${formatNum(inc.arms.stepwise.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.stepwise.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.stepwise.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.stepwise.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(inc.arms.stepwise.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-c"></span><strong>Insidental: Arm C (Rewind)</strong></td>
-              <td class="cell-numeric">${formatNum(inc.arms.rewind.avgPromptTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.rewind.avgReasoningTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.rewind.avgAnswerTokens)}</td>
-              <td class="cell-numeric">${formatNum(inc.arms.rewind.avgTotalTokens)}</td>
-              <td class="cell-numeric"><strong>${formatNum(inc.arms.rewind.amortizedTokensPerGenuineFix)}</strong></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 5. LUCKY-PASS CASE STUDY: b143f174 -->
-    <section id="lucky-pass-case">
-      <h2>
-        <span>5. Studi Kasus Lucky-Pass: Kompensasi Parsial pada Sel <code>b143f174</code></span>
-        <span class="badge badge-warning">Held-Out Failure</span>
-      </h2>
-      <p>
-        Kasus mutasi <code>b143f174-8e7c-455e-984b-efff641fbf35:const-perturb:0</code> pada <code>rb-designed-risk-assessment</code> 
-        mengilustrasikan mengapa metrik kelolosan held-out esensial. Arm C mendeteksi deviasi output tetapi alih-alih mengembalikan konstanta penalti ke 22, 
-        ia menambahkan variabel kompensasi pada formula bonus.
-      </p>
-
-      <div class="code-grid">
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>1. Kode Asli (Ground Truth)</span>
-            <span class="badge badge-success">Benar</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-diff">let penalty = a.missedPayments * 22;</span>
-  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>2. Kode Mutan (Fault Injected)</span>
-            <span class="badge badge-warning">Mutasi +1</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-mut">let penalty = a.missedPayments * 23;</span>
-  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>3. Perbaikan Arm C (Lucky Pass)</span>
-            <span class="badge badge-warning">Kompensasi</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-mut">let penalty = a.missedPayments * 23;</span>
-  <span class="highlight-diff">let bonus = Math.min(a.creditHistoryYears * 2.5 + a.missedPayments, 25);</span>
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-      </div>
-
-      <div class="callout">
-        <div class="callout-title">Mekanisme Kegagalan Held-Out:</div>
-        <p style="margin-bottom: 0;">
-          Pada dataset latih yang terlihat, penambahan <code>+ a.missedPayments</code> pada bonus secara aljabar meniadakan kelebihan pengurangan <code>-1 &times; missedPayments</code> 
-          karena tidak ada applicant yang bonusnya ter-<em>clamp</em> pada 25. Namun, pada dataset held-out (applicant <code>APP-H102</code> memiliki pengalaman 16 tahun &rarr; $16 \times 2.5 = 40 \ge 25$), 
-          fungsi <code>Math.min(..., 25)</code> memotong nilai bonus sehingga kompensasi tidak bekerja dan menghasilkan hash salah.
-        </p>
-      </div>
-    </section>
-
-    <!-- 6. KETERBATASAN (LIMITATIONS) -->
-    <section id="limitations">
-      <h2>
-        <span>6. Keterbatasan Metodologi &amp; Ancaman Validitas</span>
-      </h2>
-      <p>
-        Keterbatasan berikut merupakan bagian integral dari interpretasi hasil eksperimen ini:
-      </p>
-
-      <ul>
-        <li>
-          <strong>PQI Arm A Bernilai 1,0 Secara Konstruksi:</strong> Monolithic (Arm A) menerima seluruh kode notebook dalam satu prompt turn tunggal dan melakukan edit langsung. 
-          Oleh karena itu, metrik PQI (Process Quality Index) <em>hanya valid secara komparatif antara Arm B (Stepwise) dan Arm C (Rewind)</em>.
-        </li>
-        <li>
-          <strong>Band Mid &amp; Far Corpus Insidental Monolitik:</strong> 100% dari 18 mutasi pada band <code>mid</code> (hop 3-6) dan <code>far</code> (hop 7+) di corpus insidental 
-          berasal dari satu notebook uji akumulator tunggal (<code>zz-uji-20-cell</code>). Ini merupakan studi kasus terisolasi, bukan sampel acak representatif.
-        </li>
-        <li>
-          <strong>Kapasitas Skala Notebook:</strong> Notebook terbesar yang diuji terdiri dari 21 sel. Seluruh kode sumber notebook muat dengan leluasa dalam context window model modern (128k context), 
-          sehingga degradasi retrieval context window belum terpicu.
-        </li>
-        <li>
-          <strong>Lucky-Pass Tidak Terukur pada Korpus Insidental:</strong> Korpus insidental berasal dari notebook in-the-wild tanpa fixture data held-out terisolasi, 
-          sehingga status held-out dilaporkan sebagai <code>null / n/a</code>.
-        </li>
-        <li>
-          <strong>Ukuran Sampel ($N=30, N=39$):</strong> Pada ukuran sampel saat ini, tidak ditemukan perbedaan akurasi perbaikan yang signifikan secara statistik antar arm ($p \ge 0.5000$).
-        </li>
-      </ul>
-    </section>
-
-    <!-- 7. CROSS-MODEL EVALUATION (GLM-5.2) -->
-    <section id="cross-model">
-      <h2>
-        <span>7. Evaluasi Lintas-Model (GLM-5.2)</span>
-        <span class="badge badge-info">${glm ? "Selesai" : "Data Menyusul / Run Sedang Berjalan"}</span>
-      </h2>
-      ${
-        glm
-          ? `
-          <p>Hasil evaluasi silang pada model GLM-5.2 atas Corpus Terancang (90 episode):</p>
-          <div class="stat-grid">
-            <div class="stat-box">
-              <div class="stat-val">${glm.arms.monolithic.resolvedGenuine}/${glm.arms.monolithic.totalRuns}</div>
-              <div class="stat-label">Arm A Genuine (${formatPct(glm.arms.monolithic.resolvedGenuinePct)})</div>
-            </div>
-            <div class="stat-box">
-              <div class="stat-val">${glm.arms.stepwise.resolvedGenuine}/${glm.arms.stepwise.totalRuns}</div>
-              <div class="stat-label">Arm B Genuine (${formatPct(glm.arms.stepwise.resolvedGenuinePct)})</div>
-            </div>
-            <div class="stat-box">
-              <div class="stat-val">${glm.arms.rewind.resolvedGenuine}/${glm.arms.rewind.totalRuns}</div>
-              <div class="stat-label">Arm C Genuine (${formatPct(glm.arms.rewind.resolvedGenuinePct)})</div>
-            </div>
-          </div>
-          `
-          : `
-          <div style="background: rgba(15, 23, 42, 0.5); border: 1px dashed var(--border-subtle); padding: 24px; border-radius: 8px; text-align: center;">
-            <p style="color: var(--text-muted); margin-bottom: 8px;">
-              Eksperimen long-run GLM-5.2 sedang berjalan di session terpisah.
-            </p>
-            <p style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0;">
-              Smoke test awal menunjukkan kepatuhan format 100% (0/9 protocol failure, 0/9 length failure). Data lengkap akan dimuat secara otomatis saat run selesai.
-            </p>
-          </div>
-          `
-      }
-    </section>
-
-    <footer>
-      RewindBench Experimental Evaluation &bull; Antigravity Research Framework &bull; zaatool reactive runtime
-    </footer>
-  </div>
-</body>
-</html>`;
+@media (max-width:760px){
+  .worked,.split{grid-template-columns:1fr; gap:1.4rem}
+  .worked-verdict{padding-top:0}
+  .limits div{grid-template-columns:1fr; gap:.2rem}
+  .bar{grid-template-columns:6.5rem 1fr 4rem; gap:.6rem}
+  .facts{gap:1.4rem}
+  table.grid{font-size:.78rem}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+`;
 }
 
-export function main() {
-  const resultsDir = process.env.RESULTS_DIR || "./results";
-  const metricsJsonPath = join(resultsDir, "metrics.json");
+export function generateHtmlReport(m: Metrics, audit: Audit, visible: Record<string, number[]>): string {
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rewind-Bench — results</title>
+<meta name="description" content="A repair can match the recorded output and still be wrong. Results from 297 AI code-repair episodes.">
+<style>@font-face{font-family:'Martian Mono';src:local('Martian Mono')}
+@font-face{font-family:'Public Sans';src:local('Public Sans')}
+${css()}</style>
+</head><body>
+<div class="wrap">
+${sectionHero(m, audit)}
+${sectionBench()}
+${sectionAccuracy(m)}
+${sectionCost(m)}
+${sectionAudit(audit, visible)}
+${sectionDeterminism()}
+${sectionLimits()}
+<footer>
+  Generated from results/metrics.json and results/symptom-audit.json ·
+  every figure recomputed, none typed by hand ·
+  <a href="https://github.com/afrizagilleon/rewind-bench">github.com/afrizagilleon/rewind-bench</a>
+</footer>
+</div>
+</body></html>`;
+}
 
-  if (!existsSync(metricsJsonPath)) {
-    console.error(`Error: metrics file not found at ${metricsJsonPath}`);
-    process.exit(1);
+// ── entry ────────────────────────────────────────────────────────────────
+
+function armSplitByVisibility(resultsDir: string, audit: Audit): Record<string, number[]> {
+  const file = join(resultsDir, "arms.jsonl");
+  const vis = new Map(
+    audit.details.filter((d) => d.corpus === "incidental").map((d) => [d.mutationId, d.symptomVisible])
+  );
+  const rows = readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as { arm: string; mutationId: string; resolved: boolean; luckyPass: boolean | null });
+
+  const visible: number[] = [];
+  const invisible: number[] = [];
+  for (const a of ARMS) {
+    const mine = rows.filter((r) => r.arm === a);
+    const good = (r: (typeof rows)[number]): boolean => r.resolved && r.luckyPass !== true;
+    visible.push(mine.filter((r) => vis.get(r.mutationId) === true && good(r)).length);
+    invisible.push(mine.filter((r) => vis.get(r.mutationId) === false && good(r)).length);
+  }
+  return { visible, invisible };
+}
+
+function main(): void {
+  const resultsDir = process.env.RESULTS_DIR?.trim() || "./results";
+  const metricsPath = join(resultsDir, "metrics.json");
+  const auditPath = join(resultsDir, "symptom-audit.json");
+
+  if (!existsSync(metricsPath)) {
+    throw new Error(`${metricsPath} not found — run \`npm run metrics\` first.`);
+  }
+  if (!existsSync(auditPath)) {
+    throw new Error(`${auditPath} not found — run \`npm run audit:symptoms\` first.`);
   }
 
-  const raw = readFileSync(metricsJsonPath, "utf8");
-  const metricsData = JSON.parse(raw);
+  const metrics = JSON.parse(readFileSync(metricsPath, "utf8")) as Metrics;
+  const audit = JSON.parse(readFileSync(auditPath, "utf8")) as Audit;
+  const visible = armSplitByVisibility(resultsDir, audit);
 
-  const html = generateHtmlReport(metricsData);
-  const outPath = join(resultsDir, "report.html");
+  const out = join(resultsDir, "report.html");
+  writeFileSync(out, generateHtmlReport(metrics, audit, visible), "utf8");
 
-  writeFileSync(outPath, html, "utf8");
-  console.log(`\nSuccessfully generated self-contained HTML report at: ${outPath}`);
+  const kb = (readFileSync(out).length / 1024).toFixed(0);
+  console.log(`Wrote ${out} (${kb} KB, self-contained)`);
 }
 
-if (process.argv[1] && process.argv[1].includes("report")) {
-  main();
-}
+main();

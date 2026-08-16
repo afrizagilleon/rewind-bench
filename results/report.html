@@ -1,955 +1,366 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RewindBench: Laporan Eksperimen & Evaluasi Formal</title>
-  <style>
-    :root {
-      --bg-primary: #090d16;
-      --bg-surface: #111827;
-      --bg-card: #1e293b;
-      --bg-code: #0b0f19;
-      --border-subtle: #334155;
-      --border-strong: #475569;
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --arm-a: #3b82f6;
-      --arm-b: #f59e0b;
-      --arm-c: #10b981;
-      --danger: #ef4444;
-      --accent: #8b5cf6;
-    }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    body {
-      background-color: var(--bg-primary);
-      color: var(--text-main);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      line-height: 1.6;
-      padding: 32px 24px;
-    }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    header {
-      margin-bottom: 40px;
-      padding-bottom: 24px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    h1 {
-      font-size: 2.2rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-bottom: 8px;
-      color: #ffffff;
-    }
-    .subtitle {
-      font-size: 1.05rem;
-      color: var(--text-muted);
-    }
-    .badge {
-      display: inline-block;
-      padding: 3px 9px;
-      border-radius: 4px;
-      font-size: 0.78rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .badge-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
-    .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
-    .badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
-    
-    section {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: 10px;
-      padding: 28px;
-      margin-bottom: 32px;
-    }
-    h2 {
-      font-size: 1.45rem;
-      font-weight: 600;
-      margin-bottom: 16px;
-      letter-spacing: -0.01em;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    h3 {
-      font-size: 1.15rem;
-      font-weight: 600;
-      margin: 20px 0 12px 0;
-      color: #e2e8f0;
-    }
-    p, li {
-      color: #cbd5e1;
-      font-size: 0.95rem;
-      margin-bottom: 12px;
-    }
-    ul, ol {
-      padding-left: 24px;
-      margin-bottom: 16px;
-    }
-    .grid-2 {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
-    }
-    @media (max-width: 900px) {
-      .grid-2 { grid-template-columns: 1fr; }
-    }
-    .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 20px;
-    }
-    .stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .stat-box {
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid var(--border-subtle);
-      padding: 16px;
-      border-radius: 6px;
-      text-align: center;
-    }
-    .stat-val {
-      font-size: 1.8rem;
-      font-weight: 700;
-      color: #ffffff;
-      margin-bottom: 4px;
-    }
-    .stat-label {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rewind-Bench — results</title>
+<meta name="description" content="A repair can match the recorded output and still be wrong. Results from 297 AI code-repair episodes.">
+<style>@font-face{font-family:'Martian Mono';src:local('Martian Mono')}
+@font-face{font-family:'Public Sans';src:local('Public Sans')}
 
-    /* Tables */
-    .table-container {
-      overflow-x: auto;
-      margin: 16px 0;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-      text-align: left;
-    }
-    th, td {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    th {
-      background: #1e293b;
-      color: #e2e8f0;
-      font-weight: 600;
-      font-size: 0.82rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
-    }
-    .cell-numeric {
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
-    .arm-pill {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      margin-right: 6px;
-    }
-    .pill-a { background: var(--arm-a); }
-    .pill-b { background: var(--arm-b); }
-    .pill-c { background: var(--arm-c); }
+:root{
+  --paper:#F7F9FB; --ink:#131A1C; --ink-2:#4A5560; --ink-3:#8794A0;
+  --rule:#DBE3E8; --panel:#FFFFFF;
+  --accent:#0B5F55; --flag:#A33F1E;
+  --grid:rgba(11,95,85,.055);
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:'Public Sans',ui-sans-serif,system-ui,sans-serif;
+  font-size:16px; line-height:1.6;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:56rem; margin:0 auto; padding:0 1.5rem 6rem}
 
-    /* Code blocks */
-    pre, code {
-      font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
-      font-size: 0.86rem;
-    }
-    pre {
-      background: var(--bg-code);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 14px;
-      overflow-x: auto;
-      color: #e2e8f0;
-      line-height: 1.5;
-    }
-    .code-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 14px;
-      margin: 16px 0;
-    }
-    @media (max-width: 992px) {
-      .code-grid { grid-template-columns: 1fr; }
-    }
-    .code-col {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 14px;
-    }
-    .code-col-title {
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-    .highlight-diff {
-      color: #34d399;
-      font-weight: 600;
-    }
-    .highlight-mut {
-      color: #f87171;
-      font-weight: 600;
-    }
+/* Chart paper, only behind the opening. A readout is printed on a grid.
+   The fade lives on a pseudo-element: masking .hero itself would fade the
+   numbers too, and data you cannot read is worse than no grid at all. */
+.hero{position:relative; padding:4.5rem 0 2.4rem}
+.hero::before{
+  content:""; position:absolute; inset:-1.5rem -1.5rem 0; z-index:0;
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:22px 22px;
+  -webkit-mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  mask-image:linear-gradient(180deg,#000 0%,#000 45%,transparent 92%);
+  pointer-events:none;
+}
+.hero > *{position:relative; z-index:1}
 
-    /* Charts */
-    .chart-box {
-      margin: 20px 0;
-      display: flex;
-      justify-content: center;
-    }
+h1,h2,.figure-n,.cmp-d,.eyebrow,.bar-l,.bar-v,dt,th,code,pre{
+  font-family:'Martian Mono','JetBrains Mono',ui-monospace,monospace;
+}
+h1{
+  font-size:clamp(1.7rem,4.4vw,2.9rem); font-weight:600; line-height:1.18;
+  letter-spacing:-.04em; margin:.6rem 0 1rem;
+}
+h2{
+  font-size:clamp(1.05rem,2.2vw,1.35rem); font-weight:600; letter-spacing:-.03em;
+  margin:.35rem 0 1rem;
+}
+.eyebrow{
+  font-size:.62rem; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--ink-3); margin:0;
+}
+.lede{font-size:1.02rem; color:var(--ink-2); max-width:40rem; margin:0 0 2.2rem}
+.note{font-size:.9rem; color:var(--ink-2); max-width:44rem; margin:1rem 0 0}
+p.note:first-child{margin-top:0}
+strong{color:var(--ink); font-weight:600}
+em{font-style:italic}
+code{
+  font-size:.85em; background:color-mix(in srgb,var(--accent) 8%,var(--panel));
+  color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);
+  border-radius:2px; padding:.05em .3em;
+}
+pre{
+  margin:.3rem 0 1.1rem; padding:.75rem .9rem; overflow-x:auto;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  font-size:.74rem; line-height:1.65;
+}
+pre code{background:none; border:none; color:var(--ink); padding:0}
+.c-dim{color:var(--ink-3)}
+.c-flag{color:var(--flag)}
+.cap{
+  font-family:'Martian Mono',monospace; font-size:.58rem; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--ink-3); margin:1.1rem 0 0;
+}
 
-    .callout {
-      border-left: 4px solid var(--accent);
-      background: rgba(139, 92, 246, 0.08);
-      padding: 16px;
-      border-radius: 0 6px 6px 0;
-      margin: 16px 0;
-    }
-    .callout-title {
-      font-weight: 600;
-      color: #c4b5fd;
-      margin-bottom: 4px;
-    }
-    footer {
-      text-align: center;
-      font-size: 0.85rem;
-      color: var(--text-dim);
-      margin-top: 40px;
-      padding-top: 20px;
-      border-top: 1px solid var(--border-subtle);
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header>
-      <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
-        <div>
-          <h1>RewindBench: Laporan Eksperimen & Evaluasi Formal</h1>
-          <div class="subtitle">Evaluasi Komparatif Pemulihan Reaktif: Monolithic (Arm A) vs Stepwise (Arm B) vs Materialized Rewind (Arm C)</div>
-        </div>
-        <span class="badge badge-success">R8 Full Report</span>
+section{padding:3.2rem 0 0; border-top:1px solid var(--rule); margin-top:3.2rem}
+
+/* THE SIGNATURE — two digests and a verdict. Every claim here rests on one. */
+.cmp{
+  display:grid; grid-template-columns:1fr auto; align-items:center;
+  gap:.2rem .9rem; padding:.7rem .9rem; margin-bottom:.6rem;
+  background:var(--panel); border:1px solid var(--rule); border-radius:2px;
+  border-left:3px solid var(--ink-3);
+}
+.cmp.is-same{border-left-color:var(--accent)}
+.cmp.is-diff{border-left-color:var(--flag)}
+.cmp-l{
+  grid-column:1/-1; font-size:.72rem; color:var(--ink-2);
+}
+.cmp-d{font-size:.9rem; letter-spacing:.02em}
+.cmp.is-same .cmp-d{color:var(--accent)}
+.cmp.is-diff .cmp-d{color:var(--flag)}
+.cmp-v{font-size:.72rem; color:var(--ink-3); text-align:right}
+
+.worked{display:grid; grid-template-columns:1.15fr 1fr; gap:2.2rem; align-items:start; margin-bottom:2.4rem}
+.worked-verdict{padding-top:1.6rem}
+
+.facts{display:flex; flex-wrap:wrap; gap:2.2rem; margin:0; padding-top:1rem; border-top:1px solid var(--rule)}
+.facts div{margin:0}
+.facts dt{font-size:.6rem; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-3)}
+.facts dd{margin:.15rem 0 0; font-family:'Martian Mono',monospace; font-size:1.05rem; font-weight:600}
+
+table.grid{width:100%; border-collapse:collapse; margin:.4rem 0 0; font-size:.86rem}
+table.grid caption{
+  font-family:'Martian Mono',monospace; font-size:.58rem; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--ink-3); text-align:left; padding:1.4rem 0 .5rem;
+}
+table.grid th,table.grid td{padding:.55rem .7rem; text-align:left; border-bottom:1px solid var(--rule)}
+table.grid thead th{
+  font-size:.6rem; letter-spacing:.11em; text-transform:uppercase;
+  color:var(--ink-3); font-weight:500; vertical-align:bottom;
+}
+table.grid thead th.thin{font-size:.55rem; letter-spacing:.08em}
+table.grid tbody th{font-weight:600; color:var(--ink); white-space:nowrap}
+table.grid td{color:var(--ink-2)}
+table.grid.nums td{font-family:'Martian Mono',monospace; font-size:.82rem; color:var(--ink)}
+table.grid tbody tr.is-focus{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+table.grid tbody tr.is-focus th{box-shadow:inset 3px 0 0 var(--accent)}
+table.grid.small{font-size:.78rem}
+.sub{display:block; font-family:'Public Sans',sans-serif; font-size:.62rem;
+  letter-spacing:.04em; color:var(--ink-3); font-weight:400}
+
+.bars{display:flex; flex-direction:column; gap:.6rem; margin-top:.6rem}
+.bar{display:grid; grid-template-columns:8.5rem 1fr 5rem; gap:.9rem; align-items:center}
+.bar-l{font-size:.74rem; color:var(--ink-2)}
+.bar-t{display:block; height:16px; background:color-mix(in srgb,var(--rule) 70%,transparent)}
+.bar-f{display:block; height:100%}
+.bar-f.t-accent{background:var(--accent)}
+.bar-f.t-flag{background:var(--flag)}
+.bar-v{font-size:.78rem; text-align:right}
+
+.split{display:grid; grid-template-columns:1fr 1.25fr; gap:2.2rem; align-items:start}
+.figure{margin:0}
+.figure-n{font-size:2.9rem; font-weight:600; letter-spacing:-.05em; color:var(--accent); line-height:1}
+
+.limits{margin:0; display:flex; flex-direction:column; gap:1.1rem}
+.limits div{display:grid; grid-template-columns:9rem 1fr; gap:1.1rem}
+.limits dt{font-size:.62rem; letter-spacing:.11em; text-transform:uppercase;
+  color:var(--ink-3); border-top:1px solid var(--rule); padding-top:.35rem}
+.limits dd{margin:0; font-size:.88rem; color:var(--ink-2)}
+
+footer{margin-top:3.4rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+  font-family:'Martian Mono',monospace; font-size:.62rem; letter-spacing:.06em; color:var(--ink-3)}
+a{color:var(--accent)}
+a:focus-visible,:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+@media (max-width:760px){
+  .worked,.split{grid-template-columns:1fr; gap:1.4rem}
+  .worked-verdict{padding-top:0}
+  .limits div{grid-template-columns:1fr; gap:.2rem}
+  .bar{grid-template-columns:6.5rem 1fr 4rem; gap:.6rem}
+  .facts{gap:1.4rem}
+  table.grid{font-size:.78rem}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head><body>
+<div class="wrap">
+<header class="hero">
+    <p class="eyebrow">Rewind-Bench · results</p>
+    <h1>A repair can match<br>and still be wrong.</h1>
+    <p class="lede">We injected 67 known bugs into working notebooks and asked three AI agents to fix them.
+    Then we re-ran every accepted repair on data the agent had never seen.</p>
+
+    <div class="worked">
+      <div class="worked-code">
+        <p class="cap">one digit changed in a working notebook</p>
+<pre><code><span class="c-dim">before  </span>let penalty = a.missedPayments * 22;
+<span class="c-flag">after   </span>let penalty = a.missedPayments * 23;</code></pre>
+        <p class="cap">what the agent submitted as its repair</p>
+<pre><code>let penalty = a.missedPayments * 23;   <span class="c-dim">// left alone</span>
+let bonus = Math.min(a.creditHistoryYears * 2.5
+                     + a.missedPayments, 25);  <span class="c-dim">// cancelled out</span></code></pre>
+        <p class="note">It never fixed the bug. It added a second error of the same size pointing the
+        other way, so the two cancelled — until <code>Math.min</code> clamps, which it does on the
+        held-out data.</p>
       </div>
-    </header>
-
-    <!-- 1. H4 — DETERMINISM CENSUS -->
-    <section id="h4-determinism">
-      <h2>
-        <span>1. H4 — Determinism Census</span>
-        <span class="badge badge-success">Hasil Positif</span>
-      </h2>
-      <p>
-        Sensus determinisme komprehensif menguji fondasi pemutaran ulang (replayability) eksekusi reaktif. 
-        Tiap sel dari seluruh korpus diuji sebanyak <strong>10 kali replay berturut-turut</strong> (total 1.040 replay individual).
-      </p>
-
-      <div class="stat-grid">
-        <div class="stat-box">
-          <div class="stat-val" style="color: #34d399;">0.8942</div>
-          <div class="stat-label">Tingkat Determinisme ($r$)</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val">93 / 104</div>
-          <div class="stat-label">Sel Determinis Sempurna</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val">1.040</div>
-          <div class="stat-label">Total Replay Uji</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val" style="color: #f87171;">11</div>
-          <div class="stat-label">Sel Non-Determinis</div>
-        </div>
+      <div class="worked-verdict">
+        <div class="cmp is-same">
+      <span class="cmp-l">on the data it was shown</span>
+      <span class="cmp-d">2a9ad5c6…</span>
+      <span class="cmp-v">matches</span>
+    </div>
+        <div class="cmp is-diff">
+      <span class="cmp-l">on data it never saw</span>
+      <span class="cmp-d">365348fb…</span>
+      <span class="cmp-v">does not match</span>
+    </div>
+        <p class="note"><strong>2 of 28</strong> repairs accepted from the
+        best-equipped agent failed this second check. The other two agents failed this bug
+        outright — so the only agent that “solved” it, hadn’t.</p>
       </div>
+    </div>
 
-      <h3 style="margin-top: 24px;">Taksonomi Sebab Non-Determinisme (14 Label atas 11 Sel)</h3>
-      <p>
-        Dari 11 sel yang menunjukkan variasi output antar-replay, 3 sel memiliki &gt;1 penyebab simultan:
-      </p>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Penyebab Ketidakpastian</th>
-              <th class="cell-numeric">Frekuensi Label</th>
-              <th>Deskripsi Pola Kode</th>
-              <th>Contoh Konkret</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>Wall-Clock Time</strong></td>
-              <td class="cell-numeric"><strong>7</strong></td>
-              <td>Penggunaan <code>Date.now()</code> atau <code>new Date()</code> saat runtime</td>
-              <td>Pencatatan timestamp transaksi & perulangan berbasis tanggal dinamis</td>
-            </tr>
-            <tr>
-              <td><strong>Network I/O</strong></td>
-              <td class="cell-numeric"><strong>4</strong></td>
-              <td>Pemanggilan API eksternal tak termock via <code>fetch()</code></td>
-              <td>Live FX currency rates & live latency endpoints</td>
-            </tr>
-            <tr>
-              <td><strong>Unknown / Race Condition</strong></td>
-              <td class="cell-numeric"><strong>2</strong></td>
-              <td>Mutasi state asinkron tanpa deterministik lock</td>
-              <td>Penyisipan state variabel global pada siklus event-loop</td>
-            </tr>
-            <tr>
-              <td><strong>PRNG Unseeded</strong></td>
-              <td class="cell-numeric"><strong>1</strong></td>
-              <td>Penggunaan <code>Math.random()</code> tanpa seed LCG terisolasi</td>
-              <td>Generasi baris data acak non-seeded</td>
-            </tr>
-          </tbody>
-        </table>
+    <dl class="facts">
+      <div><dt>repair episodes</dt><dd>297</dd></div>
+      <div><dt>models</dt><dd>2</dd></div>
+      <div><dt>corpora</dt><dd>2, never pooled</dd></div>
+      <div><dt>bugs with no visible symptom</dt><dd>16</dd></div>
+    </dl>
+  </header>
+<section>
+    <p class="eyebrow">held constant · model, temperature, seed, and the full source</p>
+    <h2>Three agents, one variable.</h2>
+    <table class="grid">
+      <thead><tr><th>agent</th><th>may run code</th><th>where its upstream data comes from</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">A · monolithic</th><td>no</td><td>reads the source and reasons about it</td></tr>
+        <tr><th scope="row">B · stepwise</th><td>yes</td><td>invents it, or pastes it in by hand</td></tr>
+        <tr class="is-focus"><th scope="row">C · rewind</th><td>yes</td><td>the scope actually recorded during the healthy run</td></tr>
+      </tbody>
+    </table>
+    <p class="note">B is how the tool behaved before this work. C is what we built. A is the
+    baseline almost nobody publishes, and it turned out to matter.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured · repairs that survived a held-out seed</p>
+    <h2>Whether the recording helps depends on the model.</h2>
+
+    <table class="grid nums">
+      <thead><tr>
+        <th rowspan="2">agent</th>
+        <th colspan="2">repairs that survived</th>
+        <th colspan="2">accepted, then failed held-out</th>
+      </tr><tr>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+        <th class="thin">DeepSeek-V4-Flash</th><th class="thin">GLM-5.2</th>
+      </tr></thead>
+      <tbody><tr>
+      <th scope="row">monolithic<span class="sub">reads only</span></th>
+      <td>26 / 30</td>
+      <td>28 / 30</td>
+      <td>0</td>
+      <td>0</td>
+    </tr><tr>
+      <th scope="row">stepwise<span class="sub">guesses its inputs</span></th>
+      <td>27 / 30</td>
+      <td>27 / 30</td>
+      <td>0</td>
+      <td>1</td>
+    </tr><tr class="is-focus">
+      <th scope="row">rewind<span class="sub">gets the recording</span></th>
+      <td>26 / 30</td>
+      <td>30 / 30</td>
+      <td>2</td>
+      <td>0</td>
+    </tr></tbody>
+    </table>
+
+    <p class="note">Under the small model the three arms are indistinguishable. Under the frontier
+    model, arm C solved every bug and lost no head-to-head comparison to either other arm. The
+    identical 30 bugs, prompts and seed were used for both — only the model changed.</p>
+
+    <table class="grid small">
+      <caption>Paired comparison on the same bug, McNemar exact</caption>
+      <thead><tr><th>model</th><th>comparison</th><th>discordant</th><th>p</th></tr></thead>
+      <tbody>
+        <tr><td>DeepSeek-V4-Flash</td><td>rewind vs stepwise</td>
+            <td>0 : 1</td><td>1.00</td></tr><tr><td>DeepSeek-V4-Flash</td><td>stepwise vs monolithic</td>
+            <td>1 : 0</td><td>1.00</td></tr><tr><td>DeepSeek-V4-Flash</td><td>rewind vs monolithic</td>
+            <td>1 : 1</td><td>1.00</td></tr>
+        <tr><td>GLM-5.2</td><td>rewind vs stepwise</td>
+            <td>3 : 0</td><td>0.25</td></tr><tr><td>GLM-5.2</td><td>stepwise vs monolithic</td>
+            <td>0 : 1</td><td>1.00</td></tr><tr><td>GLM-5.2</td><td>rewind vs monolithic</td>
+            <td>2 : 0</td><td>0.50</td></tr>
+      </tbody>
+    </table>
+    <p class="note">No difference reaches significance at n = 30, and none is claimed. What
+    changed between models is the consistency of the direction, not the p-value.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured · tokens spent per repair that survived, GLM-5.2</p>
+    <h2>It is not free.</h2>
+    <div class="bars">
+      <div class="bar">
+      <span class="bar-l">A · monolithic</span>
+      <span class="bar-t"><i class="bar-f t-accent" style="width:18%"></i></span>
+      <span class="bar-v">15,923</span>
+    </div>
+      <div class="bar">
+      <span class="bar-l">B · stepwise</span>
+      <span class="bar-t"><i class="bar-f t-flag" style="width:100%"></i></span>
+      <span class="bar-v">87,397</span>
+    </div>
+      <div class="bar">
+      <span class="bar-l">C · rewind</span>
+      <span class="bar-t"><i class="bar-f t-flag" style="width:67%"></i></span>
+      <span class="bar-v">58,855</span>
+    </div>
+    </div>
+    <p class="note">Handing the agent the recording costs <strong>32.7%</strong> less than
+    making it guess — and <strong>3.7×</strong> more than not running anything at all. If a
+    program fits in the prompt, reading it beats every interactive strategy we tried.</p>
+  </section>
+<section>
+    <p class="eyebrow">audited · could the agent see anything was wrong?</p>
+    <h2>Some bugs have no symptom.</h2>
+    <p class="note">The symptom shown to an agent is the final cell's output. A mutation only had
+    to change the <em>whole run's</em> hash to enter the corpus. Those are different scopes, so a
+    bug can be valid and still be invisible from where the agent stands. We counted them.</p>
+
+    <table class="grid nums">
+      <thead><tr><th>corpus</th><th>bugs</th><th>observable</th><th>invisible</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">designed</th><td>30</td><td>25 <span class="sub">83%</span></td><td>5</td></tr>
+        <tr><th scope="row">found</th><td>39</td><td>28 <span class="sub">72%</span></td><td>11</td></tr>
+      </tbody>
+    </table>
+
+    <table class="grid nums">
+      <caption>Found corpus, split by whether the bug was observable</caption>
+      <thead><tr><th>agent</th><th>observable (28)</th><th>invisible (11)</th></tr></thead>
+      <tbody>
+        <tr>
+            <th scope="row">monolithic</th>
+            <td>25 <span class="sub">89%</span></td>
+            <td>2</td></tr><tr>
+            <th scope="row">stepwise</th>
+            <td>26 <span class="sub">93%</span></td>
+            <td>2</td></tr><tr class="is-focus">
+            <th scope="row">rewind</th>
+            <td>25 <span class="sub">89%</span></td>
+            <td>4</td></tr>
+      </tbody>
+    </table>
+    <p class="note">This hits all three arms identically, so the paired comparisons stand — but
+    the raw totals understate every arm. On bugs an agent could actually see, all three land in
+    the high eighties to low nineties.</p>
+  </section>
+<section>
+    <p class="eyebrow">measured before any model was involved · replay fidelity</p>
+    <h2>Replay is only meaningful if cells repeat.</h2>
+    <div class="split">
+      <div>
+        <p class="figure"><span class="figure-n">0.8942</span></p>
+        <p class="note">of cells return a bit-identical result given identical source and identical
+        incoming scope. 93 of 104 cells, 10 replays each, 1,040 replays. Verified separately:
+        0 cells received a varying input scope, so the control held.</p>
       </div>
-    </section>
-
-    <!-- 2. DUA CORPUS BERDAMPINGAN -->
-    <section id="side-by-side-corpora">
-      <h2>
-        <span>2. Evaluasi Komparatif Dua Corpus Berdampingan</span>
-      </h2>
-      <p>
-        Kedua korpus dievaluasi secara independen dan <strong>tidak pernah digabung menjadi satu angka agregat</strong>.
-        Corpus Terancang menguji reduksi skalar dengan held-out terverifikasi; Corpus Insidental merefleksikan notebook produksi riil.
-      </p>
-
-      <div class="grid-2">
-        <!-- Corpus Terancang -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <h3 style="margin: 0; color: #60a5fa;">Corpus Terancang (Designed)</h3>
-            <span class="badge badge-info">30 Mutasi &times; 3 Arm = 90 Runs</span>
-          </div>
-          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px;">
-            DAG heterogen 6-9 sel dengan sel terminal me-reduksi skalar. Verifikasi uji held-out independen.
-          </p>
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Metrik</th>
-                  <th class="cell-numeric">Arm A (Mono)</th>
-                  <th class="cell-numeric">Arm B (Step)</th>
-                  <th class="cell-numeric">Arm C (Rewind)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Total Runs (Valid)</td>
-                  <td class="cell-numeric">30 (27)</td>
-                  <td class="cell-numeric">30 (29)</td>
-                  <td class="cell-numeric">30 (30)</td>
-                </tr>
-                <tr>
-                  <td><strong>Resolved (All Runs)</strong></td>
-                  <td class="cell-numeric">26/30 (86.7%)</td>
-                  <td class="cell-numeric">27/30 (90.0%)</td>
-                  <td class="cell-numeric">28/30 (93.3%)</td>
-                </tr>
-                <tr>
-                  <td>Lucky Passes (Held-Out)</td>
-                  <td class="cell-numeric">0 (0.0%)</td>
-                  <td class="cell-numeric">0 (0.0%)</td>
-                  <td class="cell-numeric" style="color: #fbbf24;">2 (7.1%)</td>
-                </tr>
-                <tr style="background: rgba(255,255,255,0.03);">
-                  <td><strong>Resolved Genuine</strong></td>
-                  <td class="cell-numeric"><strong>26/30 (86.7%)</strong></td>
-                  <td class="cell-numeric"><strong>27/30 (90.0%)</strong></td>
-                  <td class="cell-numeric"><strong>26/30 (86.7%)</strong></td>
-                </tr>
-                <tr>
-                  <td>CRF (Mean / Med)</td>
-                  <td class="cell-numeric">0.90 / 1.0</td>
-                  <td class="cell-numeric">0.90 / 1.0</td>
-                  <td class="cell-numeric">0.93 / 1.0</td>
-                </tr>
-                <tr>
-                  <td>Hit@1 Rate</td>
-                  <td class="cell-numeric">27 (90.0%)</td>
-                  <td class="cell-numeric">27 (90.0%)</td>
-                  <td class="cell-numeric">28 (93.3%)</td>
-                </tr>
-                <tr>
-                  <td>PQI (Mean)</td>
-                  <td class="cell-numeric">1.000*</td>
-                  <td class="cell-numeric">0.359</td>
-                  <td class="cell-numeric">0.387</td>
-                </tr>
-                <tr>
-                  <td>Avg Turns / Wall-Clock</td>
-                  <td class="cell-numeric">2.0t / 67.6s</td>
-                  <td class="cell-numeric">8.9t / 131.6s</td>
-                  <td class="cell-numeric">7.1t / 107.3s</td>
-                </tr>
-                <tr>
-                  <td><strong>Amortized Tok/Fix</strong></td>
-                  <td class="cell-numeric"><strong>15,127</strong></td>
-                  <td class="cell-numeric"><strong>79,366</strong></td>
-                  <td class="cell-numeric"><strong>60,752</strong></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Corpus Insidental -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <h3 style="margin: 0; color: #fbbf24;">Corpus Insidental (Real-World)</h3>
-            <span class="badge badge-warning">39 Mutasi &times; 3 Arm = 117 Runs</span>
-          </div>
-          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px;">
-            Notebook riil in-the-wild. Held-out n/a. Band mid &amp; far berasal dari akumulator (<code>zz-uji-20-cell</code>).
-          </p>
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Metrik</th>
-                  <th class="cell-numeric">Arm A (Mono)</th>
-                  <th class="cell-numeric">Arm B (Step)</th>
-                  <th class="cell-numeric">Arm C (Rewind)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Total Runs (Valid)</td>
-                  <td class="cell-numeric">39 (36)</td>
-                  <td class="cell-numeric">39 (33)</td>
-                  <td class="cell-numeric">39 (33)</td>
-                </tr>
-                <tr>
-                  <td><strong>Resolved (All Runs)</strong></td>
-                  <td class="cell-numeric">27/39 (69.2%)</td>
-                  <td class="cell-numeric">28/39 (71.8%)</td>
-                  <td class="cell-numeric">29/39 (74.4%)</td>
-                </tr>
-                <tr>
-                  <td>Lucky Passes (Held-Out)</td>
-                  <td class="cell-numeric">n/a</td>
-                  <td class="cell-numeric">n/a</td>
-                  <td class="cell-numeric">n/a</td>
-                </tr>
-                <tr style="background: rgba(255,255,255,0.03);">
-                  <td><strong>Resolved Genuine</strong></td>
-                  <td class="cell-numeric"><strong>27/39 (69.2%)</strong></td>
-                  <td class="cell-numeric"><strong>28/39 (71.8%)</strong></td>
-                  <td class="cell-numeric"><strong>29/39 (74.4%)</strong></td>
-                </tr>
-                <tr>
-                  <td>CRF (Mean / Med)</td>
-                  <td class="cell-numeric">0.71 / 1.0</td>
-                  <td class="cell-numeric">0.73 / 1.0</td>
-                  <td class="cell-numeric">0.77 / 1.0</td>
-                </tr>
-                <tr>
-                  <td>Hit@1 Rate</td>
-                  <td class="cell-numeric">27 (69.2%)</td>
-                  <td class="cell-numeric">29 (74.4%)</td>
-                  <td class="cell-numeric">30 (76.9%)</td>
-                </tr>
-                <tr>
-                  <td>PQI (Mean)</td>
-                  <td class="cell-numeric">0.940*</td>
-                  <td class="cell-numeric">0.552</td>
-                  <td class="cell-numeric">0.491</td>
-                </tr>
-                <tr>
-                  <td>Avg Turns / Wall-Clock</td>
-                  <td class="cell-numeric">1.9t / 36.3s</td>
-                  <td class="cell-numeric">5.8t / 121.5s</td>
-                  <td class="cell-numeric">6.3t / 107.8s</td>
-                </tr>
-                <tr>
-                  <td><strong>Amortized Tok/Fix</strong></td>
-                  <td class="cell-numeric"><strong>12,348</strong></td>
-                  <td class="cell-numeric"><strong>40,968</strong></td>
-                  <td class="cell-numeric"><strong>41,975</strong></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 3. PERBAIKAN SUNGGUHAN & MCNEMAR PAIRED TESTS -->
-    <section id="genuine-resolution-mcnemar">
-      <h2>
-        <span>3. Analisis Perbaikan Sungguhan &amp; Uji Berpasangan McNemar</span>
-      </h2>
-      <p>
-        Uji berpasangan McNemar (dua arah exact binomial) menguji signifikansi diskordan antar perlakuan pada mutasi yang sama persis.
-        <strong>Seluruh nilai $p ge 0.5000$ (tidak ada selisih akurasi yang signifikan secara statistik).</strong>
-      </p>
-
-      <h3>A. Tabel Kontingensi &amp; Uji Berpasangan McNemar (Overall)</h3>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Corpus</th>
-              <th>Perbandingan (X vs Y)</th>
-              <th class="cell-numeric">Total Pasang</th>
-              <th class="cell-numeric">(+,+) Keduanya Ok</th>
-              <th class="cell-numeric">(+,-) X Menang</th>
-              <th class="cell-numeric">(-,+) Y Menang</th>
-              <th class="cell-numeric">(-,-) Keduanya Gagal</th>
-              <th class="cell-numeric">Diskordan (b : c)</th>
-              <th class="cell-numeric">Exact $p$-value</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td rowspan="3" style="font-weight: 600; color: #60a5fa;">Terancang</td>
-              <td>Rewind (C) vs Stepwise (B)</td>
-              <td class="cell-numeric">30</td>
-              <td class="cell-numeric">26</td>
-              <td class="cell-numeric">0</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">3</td>
-              <td class="cell-numeric">0 : 1</td>
-              <td class="cell-numeric"><strong>1.0000</strong></td>
-            </tr>
-            <tr>
-              <td>Stepwise (B) vs Monolithic (A)</td>
-              <td class="cell-numeric">30</td>
-              <td class="cell-numeric">26</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">0</td>
-              <td class="cell-numeric">3</td>
-              <td class="cell-numeric">1 : 0</td>
-              <td class="cell-numeric"><strong>1.0000</strong></td>
-            </tr>
-            <tr>
-              <td>Rewind (C) vs Monolithic (A)</td>
-              <td class="cell-numeric">30</td>
-              <td class="cell-numeric">25</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">3</td>
-              <td class="cell-numeric">1 : 1</td>
-              <td class="cell-numeric"><strong>1.0000</strong></td>
-            </tr>
-            <tr style="border-top: 2px solid var(--border-subtle);">
-              <td rowspan="3" style="font-weight: 600; color: #fbbf24;">Insidental</td>
-              <td>Rewind (C) vs Stepwise (B)</td>
-              <td class="cell-numeric">37</td>
-              <td class="cell-numeric">27</td>
-              <td class="cell-numeric">2</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">7</td>
-              <td class="cell-numeric">2 : 1</td>
-              <td class="cell-numeric"><strong>1.0000</strong></td>
-            </tr>
-            <tr>
-              <td>Stepwise (B) vs Monolithic (A)</td>
-              <td class="cell-numeric">37</td>
-              <td class="cell-numeric">26</td>
-              <td class="cell-numeric">2</td>
-              <td class="cell-numeric">1</td>
-              <td class="cell-numeric">8</td>
-              <td class="cell-numeric">2 : 1</td>
-              <td class="cell-numeric"><strong>1.0000</strong></td>
-            </tr>
-            <tr>
-              <td>Rewind (C) vs Monolithic (A)</td>
-              <td class="cell-numeric">37</td>
-              <td class="cell-numeric">27</td>
-              <td class="cell-numeric">2</td>
-              <td class="cell-numeric">0</td>
-              <td class="cell-numeric">8</td>
-              <td class="cell-numeric">2 : 0</td>
-              <td class="cell-numeric"><strong>0.5000</strong></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3 style="margin-top: 24px;">B. Stratifikasi Berdasarkan Jarak ke Terminal (distBand) — Corpus Terancang</h3>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Band Jarak (distBand)</th>
-              <th class="cell-numeric">N Mutasi</th>
-              <th class="cell-numeric">Arm A Genuine</th>
-              <th class="cell-numeric">Arm B Genuine</th>
-              <th class="cell-numeric">Arm C Genuine</th>
-              <th class="cell-numeric">Diskordan (C : B)</th>
-              <th class="cell-numeric">Exact $p$ (C vs B)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>Direct (Dist 0)</strong></td>
-              <td class="cell-numeric">6</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">6 / 6 (100.0%)</td>
-              <td class="cell-numeric">0 : 0</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-            <tr>
-              <td><strong>Short (Dist 1-3)</strong></td>
-              <td class="cell-numeric">12</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">9 / 12 (75.0%)</td>
-              <td class="cell-numeric">0 : 1</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-            <tr>
-              <td><strong>Long (Dist 4+)</strong></td>
-              <td class="cell-numeric">12</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">10 / 12 (83.3%)</td>
-              <td class="cell-numeric">1 : 1</td>
-              <td class="cell-numeric">1.0000</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 4. BIAYA: TOKEN PER PERBAIKAN SUNGGUHAN -->
-    <section id="cost-tokens">
-      <h2>
-        <span>4. Biaya Komputasi: Token per Perbaikan Sungguhan</span>
-      </h2>
-      <p>
-        Konsumsi token adalah <strong>satu-satunya sumbu dengan diferensiasi substansial</strong>. 
-        Monolithic (Arm A) paling hemat karena 1-2 turn tanpa interaksi loop; Stepwise (Arm B) paling boros karena re-eksekusi dan reasoning eksplorasi; 
-        Rewind (Arm C) menghemat 17.5% token dibanding Stepwise pada korpus terancang melalui injeksi <em>scopeBefore</em>.
-      </p>
-
-      <div class="chart-box">
-        
-    <svg viewBox="0 0 800 340" class="chart-svg" style="width: 100%; max-width: 800px; height: auto;">
-      <rect width="800" height="340" fill="#0f172a" rx="8"/>
-      <!-- Grid & Ticks -->
-      
-      <line x1="90" y1="280" x2="770" y2="280" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="78" y="284" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">0</text>
-    
-      <line x1="90" y1="226.66666666666669" x2="770" y2="226.66666666666669" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="78" y="230.66666666666669" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">20.000</text>
-    
-      <line x1="90" y1="173.33333333333334" x2="770" y2="173.33333333333334" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="78" y="177.33333333333334" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">40.000</text>
-    
-      <line x1="90" y1="120" x2="770" y2="120" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="78" y="124" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">60.000</text>
-    
-      <line x1="90" y1="66.66666666666669" x2="770" y2="66.66666666666669" stroke="#334155" stroke-dasharray="4,4" stroke-width="1"/>
-      <text x="78" y="70.66666666666669" fill="#94a3b8" font-size="11" text-anchor="end" font-family="-apple-system, sans-serif">80.000</text>
-    
-      <!-- Axes -->
-      <line x1="90" y1="40" x2="90" y2="280" stroke="#64748b" stroke-width="1.5"/>
-      <line x1="90" y1="280" x2="770" y2="280" stroke="#64748b" stroke-width="1.5"/>
-      <!-- Bars -->
-      
-        <rect x="184" y="239.66133333333335" width="44" height="40.33866666666667" rx="4" fill="#3b82f6" opacity="0.9">
-          <title>Corpus Terancang (N=30) - Arm A (Mono): 15.127 tokens/fix</title>
-        </rect>
-        <text x="206" y="231.66133333333335" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          15k
-        </text>
-      
-        <rect x="238" y="68.35733333333334" width="44" height="211.64266666666666" rx="4" fill="#f59e0b" opacity="0.9">
-          <title>Corpus Terancang (N=30) - Arm B (Step): 79.366 tokens/fix</title>
-        </rect>
-        <text x="260" y="60.357333333333344" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          79k
-        </text>
-      
-        <rect x="292" y="117.99466666666666" width="44" height="162.00533333333334" rx="4" fill="#10b981" opacity="0.9">
-          <title>Corpus Terancang (N=30) - Arm C (Rewind): 60.752 tokens/fix</title>
-        </rect>
-        <text x="314" y="109.99466666666666" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          61k
-        </text>
-      
-      <text x="260" y="308" fill="#e2e8f0" font-size="13" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-        Corpus Terancang (N=30)
-      </text>
-    
-        <rect x="524" y="247.072" width="44" height="32.928" rx="4" fill="#3b82f6" opacity="0.9">
-          <title>Corpus Insidental (N=39) - Arm A (Mono): 12.348 tokens/fix</title>
-        </rect>
-        <text x="546" y="239.072" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          12k
-        </text>
-      
-        <rect x="578" y="170.752" width="44" height="109.248" rx="4" fill="#f59e0b" opacity="0.9">
-          <title>Corpus Insidental (N=39) - Arm B (Step): 40.968 tokens/fix</title>
-        </rect>
-        <text x="600" y="162.752" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          41k
-        </text>
-      
-        <rect x="632" y="168.06666666666666" width="44" height="111.93333333333334" rx="4" fill="#10b981" opacity="0.9">
-          <title>Corpus Insidental (N=39) - Arm C (Rewind): 41.975 tokens/fix</title>
-        </rect>
-        <text x="654" y="160.06666666666666" fill="#f8fafc" font-size="11" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-          42k
-        </text>
-      
-      <text x="600" y="308" fill="#e2e8f0" font-size="13" font-weight="600" text-anchor="middle" font-family="-apple-system, sans-serif">
-        Corpus Insidental (N=39)
-      </text>
-    
-      <!-- Legend -->
-      <g transform="translate(410, 18)">
-        <rect x="0" y="0" width="14" height="14" rx="2" fill="#3b82f6"/>
-        <text x="20" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm A (Monolithic)</text>
-        <rect x="130" y="0" width="14" height="14" rx="2" fill="#f59e0b"/>
-        <text x="150" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm B (Stepwise)</text>
-        <rect x="250" y="0" width="14" height="14" rx="2" fill="#10b981"/>
-        <text x="270" y="11" fill="#cbd5e1" font-size="11" font-family="-apple-system, sans-serif">Arm C (Rewind)</text>
-      </g>
-    </svg>
-  
-      </div>
-
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Corpus &amp; Arm</th>
-              <th class="cell-numeric">Avg Prompt Tokens</th>
-              <th class="cell-numeric">Avg Reasoning Tokens</th>
-              <th class="cell-numeric">Avg Answer Tokens</th>
-              <th class="cell-numeric">Avg Total Tokens/Run</th>
-              <th class="cell-numeric">Amortized Tokens / Genuine Fix</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><span class="arm-pill pill-a"></span><strong>Terancang: Arm A (Monolithic)</strong></td>
-              <td class="cell-numeric">4,336</td>
-              <td class="cell-numeric">6,746</td>
-              <td class="cell-numeric">2,028</td>
-              <td class="cell-numeric">13,110</td>
-              <td class="cell-numeric"><strong>15,127</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-b"></span><strong>Terancang: Arm B (Stepwise)</strong></td>
-              <td class="cell-numeric">56,198</td>
-              <td class="cell-numeric">10,104</td>
-              <td class="cell-numeric">5,127</td>
-              <td class="cell-numeric">71,429</td>
-              <td class="cell-numeric"><strong>79,366</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-c"></span><strong>Terancang: Arm C (Rewind)</strong></td>
-              <td class="cell-numeric">41,623</td>
-              <td class="cell-numeric">9,631</td>
-              <td class="cell-numeric">1,397</td>
-              <td class="cell-numeric">52,652</td>
-              <td class="cell-numeric"><strong>60,752</strong></td>
-            </tr>
-            <tr style="border-top: 2px solid var(--border-subtle);">
-              <td><span class="arm-pill pill-a"></span><strong>Insidental: Arm A (Monolithic)</strong></td>
-              <td class="cell-numeric">4,687</td>
-              <td class="cell-numeric">3,696</td>
-              <td class="cell-numeric">165</td>
-              <td class="cell-numeric">8,548</td>
-              <td class="cell-numeric"><strong>12,348</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-b"></span><strong>Insidental: Arm B (Stepwise)</strong></td>
-              <td class="cell-numeric">16,918</td>
-              <td class="cell-numeric">12,088</td>
-              <td class="cell-numeric">407</td>
-              <td class="cell-numeric">29,413</td>
-              <td class="cell-numeric"><strong>40,968</strong></td>
-            </tr>
-            <tr>
-              <td><span class="arm-pill pill-c"></span><strong>Insidental: Arm C (Rewind)</strong></td>
-              <td class="cell-numeric">20,794</td>
-              <td class="cell-numeric">10,222</td>
-              <td class="cell-numeric">196</td>
-              <td class="cell-numeric">31,212</td>
-              <td class="cell-numeric"><strong>41,975</strong></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 5. LUCKY-PASS CASE STUDY: b143f174 -->
-    <section id="lucky-pass-case">
-      <h2>
-        <span>5. Studi Kasus Lucky-Pass: Kompensasi Parsial pada Sel <code>b143f174</code></span>
-        <span class="badge badge-warning">Held-Out Failure</span>
-      </h2>
-      <p>
-        Kasus mutasi <code>b143f174-8e7c-455e-984b-efff641fbf35:const-perturb:0</code> pada <code>rb-designed-risk-assessment</code> 
-        mengilustrasikan mengapa metrik kelolosan held-out esensial. Arm C mendeteksi deviasi output tetapi alih-alih mengembalikan konstanta penalti ke 22, 
-        ia menambahkan variabel kompensasi pada formula bonus.
-      </p>
-
-      <div class="code-grid">
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>1. Kode Asli (Ground Truth)</span>
-            <span class="badge badge-success">Benar</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-diff">let penalty = a.missedPayments * 22;</span>
-  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>2. Kode Mutan (Fault Injected)</span>
-            <span class="badge badge-warning">Mutasi +1</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-mut">let penalty = a.missedPayments * 23;</span>
-  let bonus = Math.min(a.creditHistoryYears * 2.5, 25);
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-
-        <div class="code-col">
-          <div class="code-col-title">
-            <span>3. Perbaikan Arm C (Lucky Pass)</span>
-            <span class="badge badge-warning">Kompensasi</span>
-          </div>
-          <pre><code>const historyScores = inputs.capacityProfiles.map((a) => {
-  <span class="highlight-mut">let penalty = a.missedPayments * 23;</span>
-  <span class="highlight-diff">let bonus = Math.min(a.creditHistoryYears * 2.5 + a.missedPayments, 25);</span>
-  let baseScore = 75 - penalty + bonus;
-  if (baseScore > 100) baseScore = 100;
-  if (baseScore < 0) baseScore = 0;
-  return {
-    ...a,
-    creditBehaviorScore: Math.round(baseScore * 100) / 100,
-  };
-});
-return { historyScores };</code></pre>
-        </div>
-      </div>
-
-      <div class="callout">
-        <div class="callout-title">Mekanisme Kegagalan Held-Out:</div>
-        <p style="margin-bottom: 0;">
-          Pada dataset latih yang terlihat, penambahan <code>+ a.missedPayments</code> pada bonus secara aljabar meniadakan kelebihan pengurangan <code>-1 &times; missedPayments</code> 
-          karena tidak ada applicant yang bonusnya ter-<em>clamp</em> pada 25. Namun, pada dataset held-out (applicant <code>APP-H102</code> memiliki pengalaman 16 tahun &rarr; $16 	imes 2.5 = 40 ge 25$), 
-          fungsi <code>Math.min(..., 25)</code> memotong nilai bonus sehingga kompensasi tidak bekerja dan menghasilkan hash salah.
-        </p>
-      </div>
-    </section>
-
-    <!-- 6. KETERBATASAN (LIMITATIONS) -->
-    <section id="limitations">
-      <h2>
-        <span>6. Keterbatasan Metodologi &amp; Ancaman Validitas</span>
-      </h2>
-      <p>
-        Keterbatasan berikut merupakan bagian integral dari interpretasi hasil eksperimen ini:
-      </p>
-
-      <ul>
-        <li>
-          <strong>PQI Arm A Bernilai 1,0 Secara Konstruksi:</strong> Monolithic (Arm A) menerima seluruh kode notebook dalam satu prompt turn tunggal dan melakukan edit langsung. 
-          Oleh karena itu, metrik PQI (Process Quality Index) <em>hanya valid secara komparatif antara Arm B (Stepwise) dan Arm C (Rewind)</em>.
-        </li>
-        <li>
-          <strong>Band Mid &amp; Far Corpus Insidental Monolitik:</strong> 100% dari 18 mutasi pada band <code>mid</code> (hop 3-6) dan <code>far</code> (hop 7+) di corpus insidental 
-          berasal dari satu notebook uji akumulator tunggal (<code>zz-uji-20-cell</code>). Ini merupakan studi kasus terisolasi, bukan sampel acak representatif.
-        </li>
-        <li>
-          <strong>Kapasitas Skala Notebook:</strong> Notebook terbesar yang diuji terdiri dari 21 sel. Seluruh kode sumber notebook muat dengan leluasa dalam context window model modern (128k context), 
-          sehingga degradasi retrieval context window belum terpicu.
-        </li>
-        <li>
-          <strong>Lucky-Pass Tidak Terukur pada Korpus Insidental:</strong> Korpus insidental berasal dari notebook in-the-wild tanpa fixture data held-out terisolasi, 
-          sehingga status held-out dilaporkan sebagai <code>null / n/a</code>.
-        </li>
-        <li>
-          <strong>Ukuran Sampel ($N=30, N=39$):</strong> Pada ukuran sampel saat ini, tidak ditemukan perbedaan akurasi perbaikan yang signifikan secara statistik antar arm ($p ge 0.5000$).
-        </li>
-      </ul>
-    </section>
-
-    <!-- 7. CROSS-MODEL EVALUATION (GLM-5.2) -->
-    <section id="cross-model">
-      <h2>
-        <span>7. Evaluasi Lintas-Model (GLM-5.2)</span>
-        <span class="badge badge-info">Data Menyusul / Run Sedang Berjalan</span>
-      </h2>
-      
-          <div style="background: rgba(15, 23, 42, 0.5); border: 1px dashed var(--border-subtle); padding: 24px; border-radius: 8px; text-align: center;">
-            <p style="color: var(--text-muted); margin-bottom: 8px;">
-              Eksperimen long-run GLM-5.2 sedang berjalan di session terpisah.
-            </p>
-            <p style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0;">
-              Smoke test awal menunjukkan kepatuhan format 100% (0/9 protocol failure, 0/9 length failure). Data lengkap akan dimuat secara otomatis saat run selesai.
-            </p>
-          </div>
-          
-    </section>
-
-    <footer>
-      RewindBench Experimental Evaluation &bull; Antigravity Research Framework &bull; zaatool reactive runtime
-    </footer>
-  </div>
-</body>
-</html>
+      <table class="grid small">
+        <thead><tr><th>cause of drift</th><th>labels</th><th>what it was</th></tr></thead>
+        <tbody><tr><th scope="row">wall-clock</th><td>7</td><td><code>Date.now()</code> inside the returned value</td></tr><tr><th scope="row">network</th><td>4</td><td>live FX and latency endpoints</td></tr><tr><th scope="row">unknown</th><td>2</td><td>traced to a real race in the engine being measured</td></tr><tr><th scope="row">PRNG</th><td>1</td><td>unseeded <code>Math.random()</code></td></tr></tbody>
+      </table>
+    </div>
+    <p class="note">14 labels over 11 cells — three cells drift for more than one reason, and the
+    table says so rather than dividing them up. Two of the unknowns turned out to be a genuine
+    concurrency bug in the engine we were measuring, which we reported and worked around.</p>
+  </section>
+<section>
+    <p class="eyebrow">stated, rather than buried</p>
+    <h2>What this does not show.</h2>
+    <dl class="limits">
+      <div><dt>size</dt><dd>The largest notebook here is 21 cells; the designed ones are 6–9. Everything fits in a prompt, which is exactly the regime where an agent that reads everything should win — and it does. Nothing here speaks to programs that do not fit.</dd></div><div><dt>power</dt><dd>n = 30 and 39. No accuracy difference reaches significance and none is claimed.</dd></div><div><dt>held-out coverage</dt><dd>Lucky passes are only measurable where we control the seeds. The found corpus reports this as not measured, never as zero.</dd></div><div><dt>deep bands</dt><dd>The found corpus's deeper bands come entirely from one repeated-template notebook. Treat those rows as a case study, not a sample.</dd></div><div><dt>our own errors</dt><dd>The bench was wrong four times. Each was caught by re-deriving every number from the raw logs rather than trusting a summary, and each correction is an amendment in the commit history — including the one that deleted our best-looking result.</dd></div>
+    </dl>
+  </section>
+<footer>
+  Generated from results/metrics.json and results/symptom-audit.json ·
+  every figure recomputed, none typed by hand ·
+  <a href="https://github.com/afrizagilleon/rewind-bench">github.com/afrizagilleon/rewind-bench</a>
+</footer>
+</div>
+</body></html>

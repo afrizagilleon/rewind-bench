@@ -3,61 +3,78 @@ import { generateHtmlReport } from "../src/report";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-describe("report.ts HTML generator", () => {
-  it("generates a self-contained HTML report with all required sections", () => {
-    const metricsPath = join(process.cwd(), "results", "metrics.json");
+const results = (f: string): string => join(process.cwd(), "results", f);
+
+describe("report generator", () => {
+  const metricsPath = results("metrics.json");
+  const auditPath = results("symptom-audit.json");
+
+  const build = (): string => {
+    const metrics = JSON.parse(readFileSync(metricsPath, "utf8"));
+    const audit = JSON.parse(readFileSync(auditPath, "utf8"));
+    // Shape only — the real split is computed from arms.jsonl in main().
+    const visible = { visible: [25, 26, 25], invisible: [2, 2, 4] };
+    return generateHtmlReport(metrics, audit, visible);
+  };
+
+  it("has the inputs it needs", () => {
     expect(existsSync(metricsPath)).toBe(true);
+    expect(existsSync(auditPath)).toBe(true);
+  });
 
-    const metricsData = JSON.parse(readFileSync(metricsPath, "utf8"));
-    const html = generateHtmlReport(metricsData);
-
-    // 1. Basic HTML structure
-    expect(html).toContain("<!DOCTYPE html>");
-    expect(html).toContain("<html lang=\"id\">");
-    expect(html).toContain("</html>");
-
-    // 2. Zero external scripts or CDNs
+  it("is self-contained — nothing is fetched at render time", () => {
+    const html = build();
     expect(html).not.toContain("<script src=");
-    expect(html).not.toContain("https://cdn.");
-    expect(html).not.toContain("https://fonts.googleapis.com");
-    expect(html).not.toContain("https://unpkg.com");
-    expect(html).not.toContain("https://cdnjs.");
+    expect(html).not.toContain("fonts.googleapis.com");
+    expect(html).not.toContain("cdn.");
+    expect(html).not.toContain("unpkg.com");
+    expect(html).not.toMatch(/<link[^>]+rel=["']stylesheet["']/);
+    // The only outbound link is the repo, and it is a link, not a dependency.
+    const urls = [...html.matchAll(/https?:\/\/[^"'\s)]+/g)].map((m) => m[0]);
+    expect(urls.every((u) => u.includes("github.com/afrizagilleon"))).toBe(true);
+  });
 
-    // 3. Section 1: H4 Determinism Census
-    expect(html).toContain("H4 — Determinism Census");
+  it("carries the verified determinism figures", () => {
+    const html = build();
     expect(html).toContain("0.8942");
-    expect(html).toContain("93 / 104");
-    expect(html).toContain("1.040");
-    expect(html).toContain("Wall-Clock Time");
-    expect(html).toContain("Network I/O");
-    expect(html).toContain("Unknown / Race Condition");
-    expect(html).toContain("PRNG Unseeded");
+    expect(html).toContain("93 of 104");
+    expect(html).toContain("1,040");
+  });
 
-    // 4. Section 2: Two Corpora Side-by-Side
-    expect(html).toContain("Corpus Terancang (Designed)");
-    expect(html).toContain("Corpus Insidental (Real-World)");
+  it("reports both models side by side and never pools the corpora", () => {
+    const html = build();
+    expect(html).toContain("DeepSeek-V4-Flash");
+    expect(html).toContain("GLM-5.2");
+    expect(html).toContain("never pooled");
+  });
 
-    // 5. Section 3: Genuine Resolution & McNemar Paired Tests
-    expect(html).toContain("McNemar");
-    expect(html).toContain("exact binomial");
-    expect(html).toContain("1.0000");
+  it("states the bounds rather than burying them", () => {
+    const html = build();
+    expect(html).toContain("What this does not show");
+    expect(html).toContain("none is claimed");
+  });
 
-    // 6. Section 4: Cost & SVG Bar Chart
-    expect(html).toContain("<svg viewBox=");
-    expect(html).toContain("Amortized Tokens / Genuine Fix");
+  it("shows the held-out failure as two disagreeing digests", () => {
+    const html = build();
+    expect(html).toContain("cmp is-same");
+    expect(html).toContain("cmp is-diff");
+    expect(html).toContain("does not match");
+  });
 
-    // 7. Section 5: Lucky-pass case study b143f174
-    expect(html).toContain("b143f174");
-    expect(html).toContain("let penalty = a.missedPayments * 22;");
-    expect(html).toContain("let penalty = a.missedPayments * 23;");
-    expect(html).toContain("let bonus = Math.min(a.creditHistoryYears * 2.5 + a.missedPayments, 25);");
+  it("derives its figures from metrics.json rather than hard-coding them", () => {
+    const metrics = JSON.parse(readFileSync(metricsPath, "utf8"));
+    const audit = JSON.parse(readFileSync(auditPath, "utf8"));
+    const visible = { visible: [1, 2, 3], invisible: [4, 5, 6] };
 
-    // 8. Section 6: Limitations
-    expect(html).toContain("Keterbatasan Metodologi");
-    expect(html).toContain("PQI Arm A Bernilai 1,0 Secara Konstruksi");
-    expect(html).toContain("zz-uji-20-cell");
+    const bumped = structuredClone(metrics);
+    bumped.designed.arms.rewind.luckyPassCount = 99;
+    const html = generateHtmlReport(bumped, audit, visible);
+    expect(html).toContain("99 of");
+  });
 
-    // 9. Section 7: GLM Cross-Model Section
-    expect(html).toContain("Evaluasi Lintas-Model (GLM-5.2)");
+  it("writes English only", () => {
+    const html = build();
+    const prose = html.replace(/<style>[\s\S]*?<\/style>/g, "");
+    expect(prose).not.toMatch(/\b(yang|dengan|adalah|tidak|untuk|dari|corpus terancang)\b/i);
   });
 });
